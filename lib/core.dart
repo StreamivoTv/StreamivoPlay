@@ -19,7 +19,13 @@ const servers = [
 const tmdbKey = '3bf6a5f0d7d9ddf8027b98ca0dd3c655';
 
 // Many IPTV panels block Dart's default User-Agent, so look like a normal player
-const ua = {'User-Agent': 'VLC/3.0.20 LibVLC/3.0.20', 'Accept': '*/*'};
+const defaultUa = 'VLC/3.0.20 LibVLC/3.0.20';
+Map<String, String> ua = {'User-Agent': defaultUa, 'Accept': '*/*'};
+
+const String appVersion = '1.1.0';
+
+// Bumped whenever a display setting changes so the whole UI rebuilds
+final ValueNotifier<int> uiTick = ValueNotifier<int>(0);
 
 // Last login failure details (shown on the login screen)
 String loginDiag = '';
@@ -147,6 +153,24 @@ class Cfg {
 
   static final Map<String, int> counts = {};
 
+  // Generic key/value settings (used by the new settings dialogs)
+  static SharedPreferences? _p;
+  static String gs(String k, [String d = '']) => _p?.getString(k) ?? d;
+  static bool gb(String k, bool d) => _p?.getBool(k) ?? d;
+  static Future<void> ps(String k, String v) async {
+    await _p?.setString(k, v);
+  }
+
+  static Future<void> pb(String k, bool v) async {
+    await _p?.setBool(k, v);
+  }
+
+  static bool get h12 => gs('cfg_time', '24') == '12';
+  static int get layout {
+    final n = int.tryParse(gs('cfg_layout', '0')) ?? 0;
+    return n < 0 || n > 5 ? 0 : n;
+  }
+
   static Future<void> saveCount(String type, int n) async {
     if (counts[type] == n) return;
     counts[type] = n;
@@ -158,6 +182,9 @@ class Cfg {
 
   static Future<void> load() async {
     final p = await SharedPreferences.getInstance();
+    _p = p;
+    final savedUa = p.getString('cfg_ua') ?? '';
+    if (savedUa.trim().isNotEmpty) ua['User-Agent'] = savedUa.trim();
     for (final t in ['live', 'movie', 'series']) {
       final v = int.tryParse(p.getString('cnt_$t') ?? '');
       if (v != null) counts[t] = v;
@@ -417,7 +444,8 @@ class Lib {
     if (path != null &&
         f != null &&
         f.existsSync() &&
-        DateTime.now().difference(f.statSync().modified).inHours < 12) {
+        (!Cfg.gb('auto_content', true) ||
+            DateTime.now().difference(f.statSync().modified).inHours < 24)) {
       final l = await compute(readCache, path);
       if (ep != _epoch) return;
       if (l.isNotEmpty) {
@@ -659,11 +687,17 @@ Future<bool> toggleFavOf(String type, It i) async {
 }
 
 // Cast photos and roles from TMDB (only when tmdbKey is set)
+String get tmdbActiveKey {
+  final c = Cfg.gs('tmdb_key').trim();
+  return c.isNotEmpty ? c : tmdbKey;
+}
+
 Future<List<Map>> tmdbCast(String kind, String id) async {
-  if (tmdbKey.isEmpty || id.isEmpty || id == '0') return [];
+  final key = tmdbActiveKey;
+  if (!Cfg.gb('tmdb_on', true) || key.isEmpty || id.isEmpty || id == '0') return [];
   try {
     final r = await http
-        .get(Uri.parse('https://api.themoviedb.org/3/$kind/$id/credits?api_key=$tmdbKey'))
+        .get(Uri.parse('https://api.themoviedb.org/3/$kind/$id/credits?api_key=$key'))
         .timeout(const Duration(seconds: 15));
     final d = jsonDecode(r.body);
     final l = d is Map ? d['cast'] : null;
@@ -804,4 +838,44 @@ class _FocusCardState extends State<FocusCard> {
       ),
     );
   }
+}
+
+// Poster / backdrop from TMDB when the provider has none
+Future<Map<String, String>> tmdbArt(String kind, String id, String name) async {
+  final out = <String, String>{};
+  final key = tmdbActiveKey;
+  if (!Cfg.gb('tmdb_on', true) || key.isEmpty) return out;
+  try {
+    Map? m;
+    if (id.isNotEmpty && id != '0') {
+      final r = await http
+          .get(Uri.parse('https://api.themoviedb.org/3/$kind/$id?api_key=$key'))
+          .timeout(const Duration(seconds: 15));
+      final d = jsonDecode(r.body);
+      if (d is Map) m = d;
+    }
+    if (m == null || m['poster_path'] == null) {
+      final ym = RegExp(r'\((\d{4})\)').firstMatch(name);
+      final q = name
+          .replaceAll(RegExp(r'\(.*?\)|\[.*?\]'), '')
+          .replaceFirst(RegExp(r'^[^|]*\|'), '')
+          .trim();
+      if (q.isEmpty) return out;
+      var url = 'https://api.themoviedb.org/3/search/$kind?api_key=$key&query=${Uri.encodeComponent(q)}';
+      if (ym != null) {
+        url += kind == 'tv' ? '&first_air_date_year=${ym.group(1)}' : '&year=${ym.group(1)}';
+      }
+      final r = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
+      final d = jsonDecode(r.body);
+      final l = d is Map ? d['results'] : null;
+      if (l is List && l.isNotEmpty && l.first is Map) m = l.first as Map;
+    }
+    if (m != null) {
+      final pp = clean(m['poster_path']);
+      final bp = clean(m['backdrop_path']);
+      if (pp.isNotEmpty) out['poster'] = 'https://image.tmdb.org/t/p/w500$pp';
+      if (bp.isNotEmpty) out['back'] = 'https://image.tmdb.org/t/p/w780$bp';
+    }
+  } catch (_) {}
+  return out;
 }

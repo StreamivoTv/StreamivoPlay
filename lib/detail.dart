@@ -1,7 +1,21 @@
 import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
 import 'core.dart';
+import 'fx.dart';
+import 'main.dart';
 import 'player.dart';
+import 'settings.dart';
+
+class _Ep {
+  final String title, thumb, plot, dur, no;
+  final Pi pi;
+  const _Ep(this.title, this.thumb, this.plot, this.dur, this.no, this.pi);
+}
+
+String _hms(int s) {
+  String t(int n) => n.toString().padLeft(2, '0');
+  return '${t(s ~/ 3600)}:${t((s % 3600) ~/ 60)}:${t(s % 60)}';
+}
 
 class DetailPage extends StatefulWidget {
   final Session s;
@@ -16,7 +30,6 @@ class _DetailState extends State<DetailPage> {
   Session get s => widget.s;
   It get it => widget.it;
   bool get isSeries => widget.type == 'series';
-  Lib get lib => isSeries ? s.series : s.movie;
 
   Map info = {};
   Map<String, List> seasons = {};
@@ -25,10 +38,21 @@ class _DetailState extends State<DetailPage> {
   bool loading = true, fav = false;
   String? error;
   List<Map> tmdb = [];
+  Map<String, String> art = {};
 
   @override
   void initState() {
     super.initState();
+    init();
+  }
+
+  void reload() {
+    setState(() {
+      loading = true;
+      error = null;
+      tmdb = [];
+      art = {};
+    });
     init();
   }
 
@@ -63,8 +87,14 @@ class _DetailState extends State<DetailPage> {
     final fl = await loadList('fav_${widget.type}');
     fav = fl.any((x) => x.id == it.id);
     if (mounted) setState(() => loading = false);
-    final c = await tmdbCast(isSeries ? 'tv' : 'movie', clean(info['tmdb_id'] ?? info['tmdb']));
+    final tid = clean(info['tmdb_id'] ?? info['tmdb']);
+    final kind = isSeries ? 'tv' : 'movie';
+    final c = await tmdbCast(kind, tid);
     if (mounted && c.isNotEmpty) setState(() => tmdb = c);
+    if (mounted && coverUrl.isEmpty) {
+      final a = await tmdbArt(kind, tid, it.name);
+      if (mounted && a.isNotEmpty) setState(() => art = a);
+    }
   }
 
   String pick(List<String> keys) {
@@ -75,16 +105,26 @@ class _DetailState extends State<DetailPage> {
     return '';
   }
 
-  String get back {
-    final b = info['backdrop_path'];
-    if (b is List) return b.isEmpty ? '' : clean(b.first);
-    return clean(b);
+  // Poster given by the provider (empty when there is none)
+  String get coverUrl {
+    final p = pick(isSeries ? ['cover', 'movie_image'] : ['movie_image', 'cover']);
+    return p.isNotEmpty ? p : it.icon;
   }
 
-  String get date {
-    final d = pick(['releasedate', 'releaseDate', 'release_date']);
-    final p = d.split('-');
-    return p.length == 3 && p[0].length == 4 ? '${p[2]}-${p[1]}-${p[0]}' : d;
+  String get posterUrl => coverUrl.isNotEmpty ? coverUrl : (art['poster'] ?? '');
+
+  String get back {
+    final b = info['backdrop_path'];
+    final v = b is List ? (b.isEmpty ? '' : clean(b.first)) : clean(b);
+    return v.isNotEmpty ? v : (art['back'] ?? '');
+  }
+
+  String get year {
+    final d = pick(['releasedate', 'releaseDate', 'release_date', 'year']);
+    final m = RegExp(r'(19|20)\d{2}').firstMatch(d);
+    if (m != null) return m.group(0)!;
+    final n = RegExp(r'\(((?:19|20)\d{2})\)').firstMatch(it.name);
+    return n?.group(1) ?? '';
   }
 
   String get duration {
@@ -94,15 +134,26 @@ class _DetailState extends State<DetailPage> {
     return r.isEmpty ? '' : '$r min';
   }
 
-  List<Pi> eps(String k) {
-    final out = <Pi>[];
+  List<_Ep> eps(String k) {
+    final out = <_Ep>[];
     for (final e in (seasons[k] ?? <dynamic>[])) {
       if (e is! Map) continue;
-      final t = clean(e['title']);
+      final inf = e['info'] is Map ? e['info'] as Map : {};
+      final n = clean(e['episode_num']).isEmpty ? '${out.length + 1}' : clean(e['episode_num']);
+      var t = clean(e['title']);
+      if (t.isEmpty) t = 'Episode $n';
       final x = clean(e['container_extension']);
       final xe = x.isEmpty ? 'mp4' : x;
-      out.add(Pi(t.isEmpty ? it.name : t, s.seriesUrl('${e['id']}', xe),
-          s.seriesUrl('${e['id']}', xe == 'mp4' ? 'mkv' : 'mp4')));
+      var dur = clean(inf['duration']);
+      if (dur.isEmpty) dur = _hms(int.tryParse(clean(inf['duration_secs'])) ?? 0);
+      out.add(_Ep(
+          t,
+          clean(inf['movie_image']),
+          clean(inf['plot']),
+          dur,
+          n,
+          Pi(t, s.seriesUrl('${e['id']}', xe),
+              s.seriesUrl('${e['id']}', xe == 'mp4' ? 'mkv' : 'mp4'))));
     }
     return out;
   }
@@ -110,13 +161,14 @@ class _DetailState extends State<DetailPage> {
   Future<void> watch(List<Pi> list, int idx) async {
     await addRecentTo(widget.type, it);
     if (!mounted) return;
-    await playItems(context, s, list, idx, false);
+    await playItems(context, s, list, idx, false, kind: widget.type);
   }
 
   void watchNow() {
     if (isSeries) {
-      final l = eps(season);
-      if (l.isNotEmpty) watch(l, 0);
+      if (seasons.isEmpty) return;
+      final l = eps(seasons.keys.first);
+      if (l.isNotEmpty) watch([for (final e in l) e.pi], 0);
     } else {
       final ext = movieExt.isEmpty ? it.ext : movieExt;
       final ex = ext.isEmpty ? 'mp4' : ext;
@@ -127,6 +179,14 @@ class _DetailState extends State<DetailPage> {
   Future<void> toggleFav() async {
     final now = await toggleFavOf(widget.type, it);
     if (mounted) setState(() => fav = now);
+  }
+
+  String get playLabel {
+    if (!isSeries) return 'Play';
+    if (seasons.isEmpty) return 'Play S1 E1';
+    final k = seasons.keys.first;
+    final l = eps(k);
+    return 'Play S$k E${l.isEmpty ? 1 : l.first.no}';
   }
 
   Widget castSection(String castNames) {
@@ -191,150 +251,228 @@ class _DetailState extends State<DetailPage> {
     ]);
   }
 
+  Widget backdrop() {
+    final b = back, p = posterUrl;
+    final url = b.isNotEmpty ? b : p;
+    if (url.isEmpty) return Opacity(opacity: 0.55, child: const NoPoster());
+    return ImageFiltered(
+      imageFilter: ImageFilter.blur(sigmaX: 1.5, sigmaY: 1.5),
+      child: Image.network(url,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => Opacity(opacity: 0.55, child: const NoPoster())),
+    );
+  }
+
+  Widget seasonTabs() => SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(children: [
+          for (final k in seasons.keys)
+            InkWell(
+              onTap: () => setState(() => season = k),
+              focusColor: Colors.white12,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Text.rich(TextSpan(children: [
+                    TextSpan(
+                        text: 'SEASON $k',
+                        style: TextStyle(
+                            fontSize: 19,
+                            fontWeight: FontWeight.bold,
+                            color: season == k ? Colors.white : Colors.white60)),
+                    TextSpan(
+                        text: '  (${seasons[k]!.length})',
+                        style: const TextStyle(fontSize: 15, color: Colors.white54)),
+                  ])),
+                  const SizedBox(height: 8),
+                  Container(
+                      height: 3,
+                      width: 46,
+                      color: season == k ? const Color(0xFFE53935) : Colors.transparent),
+                ]),
+              ),
+            ),
+        ]),
+      );
+
+  Widget epRow(List<_Ep> l, int i) {
+    final e = l[i];
+    final th = e.thumb.isNotEmpty ? e.thumb : posterUrl;
+    return InkWell(
+      onTap: () => watch([for (final x in l) x.pi], i),
+      focusColor: Colors.white12,
+      borderRadius: BorderRadius.circular(14),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Colors.white12))),
+        child: Row(children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: SizedBox(
+              width: 170,
+              height: 98,
+              child: Stack(fit: StackFit.expand, children: [
+                th.isEmpty
+                    ? Container(color: card)
+                    : Image.network(th,
+                        fit: BoxFit.cover,
+                        cacheWidth: 360,
+                        errorBuilder: (_, __, ___) => Container(color: card)),
+                Positioned(
+                  left: 8,
+                  bottom: 8,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                        color: Colors.black87, borderRadius: BorderRadius.circular(8)),
+                    child: Text('EP ${e.no}',
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                  ),
+                ),
+              ]),
+            ),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(e.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 20)),
+              const SizedBox(height: 4),
+              Row(children: [
+                Text('Season $season', style: const TextStyle(fontSize: 14, color: Colors.white60)),
+                Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 8),
+                    width: 4,
+                    height: 4,
+                    color: Colors.white60),
+                const Icon(Icons.schedule, size: 16, color: Colors.white60),
+                const SizedBox(width: 4),
+                Text(e.dur, style: const TextStyle(fontSize: 14, color: Colors.white60)),
+              ]),
+              const SizedBox(height: 4),
+              Text(e.plot.isEmpty ? 'No description available.' : e.plot,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 15, color: Colors.white38)),
+            ]),
+          ),
+          const SizedBox(width: 12),
+          Container(
+            width: 46,
+            height: 46,
+            decoration: const BoxDecoration(shape: BoxShape.circle, gradient: fxGrad),
+            child: const Icon(Icons.play_arrow, size: 26),
+          ),
+        ]),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext c) {
-    final pos = pick(isSeries ? ['cover', 'movie_image'] : ['movie_image', 'cover']);
-    final poster = pos.isEmpty ? it.icon : pos;
-    final bk = back;
-    final genres = pick(['genre'])
-        .split(RegExp(r'[,/|]'))
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty)
-        .toList();
+    final poster = posterUrl;
     final castNames = pick(['cast', 'actors']);
     final plot = pick(['plot', 'description']);
-    final meta = [duration, date].where((e) => e.isNotEmpty).join('   ·   ');
-    final el = isSeries ? eps(season) : <Pi>[];
+    final meta = isSeries
+        ? [year, seasons.isEmpty ? '' : '${seasons.length} Seasons'].where((e) => e.isNotEmpty).join('·')
+        : [year, duration].where((e) => e.isNotEmpty).join('·');
+    final el = isSeries && season.isNotEmpty ? eps(season) : <_Ep>[];
     return Scaffold(
-      body: Stack(children: [
-        Positioned.fill(
-          child: bk.isEmpty
-              ? Container(color: bg)
-              : ImageFiltered(
-                  imageFilter: ImageFilter.blur(sigmaX: 1.2, sigmaY: 1.2),
-                  child: Image.network(bk,
-                      fit: BoxFit.cover, errorBuilder: (_, __, ___) => Container(color: bg)),
-                ),
-        ),
-        Positioned.fill(child: Container(color: Colors.black.withAlpha(120))),
-        SafeArea(
-          child: Column(children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-              child: Row(children: [rb(Icons.arrow_back, () => Navigator.pop(context))]),
-            ),
-            Expanded(
-              child: loading
-                  ? const Center(child: CircularProgressIndicator())
-                  : SingleChildScrollView(
-                      padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(10),
-                            child: SizedBox(
-                              width: 130,
-                              height: 195,
-                              child: poster.isEmpty
-                                  ? Container(color: card, child: const Icon(Icons.movie, size: 40))
-                                  : Image.network(poster,
-                                      fit: BoxFit.cover,
-                                      cacheWidth: 300,
-                                      errorBuilder: (_, __, ___) =>
-                                          Container(color: card, child: const Icon(Icons.movie))),
-                            ),
-                          ),
-                          const SizedBox(width: 24),
-                          Expanded(
-                            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                              Text(lib.catName(it.cat).toUpperCase(),
-                                  style: const TextStyle(
-                                      fontSize: 13, letterSpacing: 2, fontWeight: FontWeight.w600)),
-                              const SizedBox(height: 6),
-                              Text(it.name,
-                                  style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-                              if (meta.isNotEmpty) ...[
-                                const SizedBox(height: 8),
-                                Text(meta, style: const TextStyle(fontSize: 15, color: Colors.white70)),
-                              ],
-                              if (genres.isNotEmpty) ...[
-                                const SizedBox(height: 10),
-                                Wrap(spacing: 8, runSpacing: 8, children: [
-                                  for (final g in genres)
-                                    Container(
-                                      padding:
-                                          const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                                      decoration: BoxDecoration(
-                                          border: Border.all(color: Colors.white38),
-                                          borderRadius: BorderRadius.circular(20)),
-                                      child: Text(g, style: const TextStyle(fontSize: 13)),
-                                    ),
-                                ]),
-                              ],
-                              if (castNames.isNotEmpty) ...[
-                                const SizedBox(height: 10),
-                                Text.rich(
-                                  TextSpan(children: [
-                                    const TextSpan(
-                                        text: 'Cast:  ',
-                                        style: TextStyle(fontWeight: FontWeight.bold)),
-                                    TextSpan(text: castNames),
-                                  ]),
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(fontSize: 14),
-                                ),
-                              ],
-                              const SizedBox(height: 16),
-                              Wrap(spacing: 12, runSpacing: 10, children: [
-                                SizedBox(
-                                    width: 170,
-                                    child: GradBtn('Watch Now', watchNow, icon: Icons.play_arrow)),
-                                SizedBox(
-                                  width: 230,
-                                  child: GradBtn(
-                                      fav ? 'Remove from Favourite' : 'Add to Favourite', toggleFav,
-                                      outline: true, icon: Icons.favorite),
-                                ),
-                              ]),
-                            ]),
-                          ),
-                        ]),
-                        if (error != null)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 16),
-                            child: Text(error!, style: const TextStyle(color: Colors.redAccent)),
-                          ),
-                        if (isSeries && seasons.isNotEmpty) ...[
-                          const SizedBox(height: 20),
-                          Wrap(spacing: 8, children: [
-                            for (final k in seasons.keys)
-                              ChoiceChip(
-                                label: Text('Season $k'),
-                                selected: season == k,
-                                onSelected: (_) => setState(() => season = k),
+      body: SafeArea(
+        child: Column(children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
+            child: Row(children: [
+              rb(Icons.arrow_back, () => Navigator.pop(c)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(it.name,
+                    maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 18)),
+              ),
+              rb(Icons.home, () => Navigator.popUntil(c, (r) => r.isFirst)),
+              rb(Icons.sync, reload),
+              rb(Icons.settings,
+                  () => Navigator.push(c, MaterialPageRoute(builder: (_) => const SettingsPage()))),
+              rb(Icons.logout, () => doLogout(c)),
+            ]),
+          ),
+          Expanded(
+            child: Stack(children: [
+              Positioned.fill(child: backdrop()),
+              Positioned.fill(child: Container(color: Colors.black.withAlpha(110))),
+              Positioned.fill(
+                child: loading
+                    ? const Center(child: CircularProgressIndicator())
+                    : SingleChildScrollView(
+                        padding: const EdgeInsets.fromLTRB(28, 22, 28, 28),
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(14),
+                              child: SizedBox(
+                                width: 150,
+                                height: 225,
+                                child: poster.isEmpty
+                                    ? const NoPoster()
+                                    : Image.network(poster,
+                                        fit: BoxFit.cover,
+                                        cacheWidth: 340,
+                                        errorBuilder: (_, __, ___) => const NoPoster()),
                               ),
-                          ]),
-                          const SizedBox(height: 8),
-                          for (var i = 0; i < el.length; i++)
-                            ListTile(
-                              leading: Text('${i + 1}', style: const TextStyle(fontSize: 16)),
-                              title: Text(el[i].title),
-                              trailing: const Icon(Icons.play_arrow),
-                              onTap: () => watch(el, i),
                             ),
-                        ],
-                        castSection(castNames),
-                        if (plot.isNotEmpty) ...[
-                          const SizedBox(height: 18),
-                          Text(plot, style: const TextStyle(fontSize: 15, height: 1.35)),
-                        ],
-                      ]),
-                    ),
-            ),
-          ]),
-        ),
-      ]),
+                            const SizedBox(width: 26),
+                            Expanded(
+                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                Text(it.name,
+                                    style: const TextStyle(fontSize: 30, fontWeight: FontWeight.bold)),
+                                if (meta.isNotEmpty) ...[
+                                  const SizedBox(height: 10),
+                                  Text(meta, style: const TextStyle(fontSize: 17)),
+                                ],
+                                if (plot.isNotEmpty) ...[
+                                  const SizedBox(height: 10),
+                                  Text(plot,
+                                      maxLines: 5,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontSize: 16, height: 1.35)),
+                                ],
+                                if (error != null)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 10),
+                                    child: Text(error!, style: const TextStyle(color: Colors.redAccent)),
+                                  ),
+                                const SizedBox(height: 16),
+                                Wrap(spacing: 12, runSpacing: 10, children: [
+                                  SizedBox(
+                                      width: 200,
+                                      child: GradBtn(playLabel, watchNow, icon: Icons.play_arrow)),
+                                  SizedBox(
+                                    width: 250,
+                                    child: GradBtn(fav ? 'Remove Favourite' : 'Add to Favourite', toggleFav,
+                                        outline: true, icon: Icons.favorite),
+                                  ),
+                                ]),
+                              ]),
+                            ),
+                          ]),
+                          if (isSeries && seasons.isNotEmpty) ...[
+                            const SizedBox(height: 26),
+                            seasonTabs(),
+                            const Divider(color: Colors.white24, height: 1),
+                            const Padding(
+                              padding: EdgeInsets.fromLTRB(4, 22, 0, 8),
+                              child: Text('EPISODES',
+                                  style: TextStyle(fontSize: 18, letterSpacing: 0.5)),
+                            ),
+                            for (var i = 0; i < el.length; i++) epRow(el, i),
+                          ],
+                          castSection(castNames),
+                        ]),
+                      ),
+              ),
+            ]),
+          ),
+        ]),
+      ),
     );
   }
 }

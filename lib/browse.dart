@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import 'core.dart';
 import 'detail.dart';
+import 'fx.dart';
 import 'main.dart';
 import 'player.dart';
 import 'settings.dart';
@@ -95,7 +96,32 @@ class _BrowseState extends State<Browse> {
     await select(catId);
   }
 
+  final Set<String> unlocked = {};
+
+  // Parental control: hides adult categories from mixed lists
+  List<It> _safe(List<It> l) {
+    if (Cfg.gs('pin').isEmpty) return l;
+    final bad = <int>{
+      for (final c in lib.cats)
+        if (adultName('${c['category_name']}')) int.tryParse('${c['category_id']}') ?? -1
+    };
+    if (bad.isEmpty) return l;
+    return l.where((i) => !bad.contains(i.cat)).toList();
+  }
+
   Future<void> select(String id) async {
+    if (Cfg.gs('pin').isNotEmpty &&
+        adultName(lib.catName(int.tryParse(id) ?? -1)) &&
+        !unlocked.contains(id)) {
+      final ok = await verifyPin(context);
+      if (!mounted) return;
+      if (!ok) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Wrong PIN')));
+        return;
+      }
+      unlocked.add(id);
+    }
     final my = ++selGen;
     setState(() {
       catId = id;
@@ -118,6 +144,7 @@ class _BrowseState extends State<Browse> {
       } else {
         res = await lib.cat(id);
       }
+      if (id == 'all' || id == 'added' || id == 'recent' || id == 'fav') res = _safe(res);
     } catch (_) {
       err = 'Failed to load this category. Tap RETRY.';
     }
@@ -131,7 +158,7 @@ class _BrowseState extends State<Browse> {
   void recompute() {
     List<It> l;
     if (!live && catId == 'all') {
-      l = q.isEmpty ? <It>[] : lib.search(q);
+      l = q.isEmpty ? <It>[] : _safe(lib.search(q));
     } else if (q.isEmpty) {
       l = items;
     } else {

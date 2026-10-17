@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'account.dart';
 import 'browse.dart';
 import 'core.dart';
 import 'extra.dart';
+import 'fx.dart';
 import 'settings.dart';
 
 Future<void> main() async {
@@ -85,31 +87,41 @@ Future<void> doLogout(BuildContext c) async {
   }
 }
 
+double uiK() {
+  final m = Cfg.gs('cfg_disp', 'auto');
+  if (m == 'tv') return 1.0;
+  if (m == 'phone') return uiScale;
+  return isTv ? 1.0 : uiScale;
+}
+
 class StreamivoApp extends StatelessWidget {
   const StreamivoApp({super.key});
   @override
   Widget build(BuildContext c) => MaterialApp(
         title: 'Streamivo',
         debugShowCheckedModeBanner: false,
-        builder: (ctx, child) {
-          // Whole UI is drawn a bit smaller so more fits on the phone screen
-          final k = isTv ? 1.0 : uiScale;
-          if (child == null || k == 1.0) return child ?? const SizedBox();
-          final mq = MediaQuery.of(ctx);
-          final w = mq.size.width / k, h = mq.size.height / k;
-          return MediaQuery(
-            data: mq.copyWith(
-              size: Size(w, h),
-              padding: mq.padding / k,
-              viewPadding: mq.viewPadding / k,
-              viewInsets: mq.viewInsets / k,
-            ),
-            child: FittedBox(
-              fit: BoxFit.fill,
-              child: SizedBox(width: w, height: h, child: child),
-            ),
-          );
-        },
+        builder: (ctx, child) => ValueListenableBuilder<int>(
+          valueListenable: uiTick,
+          builder: (c2, _, __) {
+            // Whole UI is drawn a bit smaller so more fits on the phone screen
+            final k = uiK();
+            if (child == null) return const SizedBox();
+            final mq = MediaQuery.of(c2);
+            final w = mq.size.width / k, h = mq.size.height / k;
+            return MediaQuery(
+              data: mq.copyWith(
+                size: Size(w, h),
+                padding: mq.padding / k,
+                viewPadding: mq.viewPadding / k,
+                viewInsets: mq.viewInsets / k,
+              ),
+              child: FittedBox(
+                fit: BoxFit.fill,
+                child: SizedBox(width: w, height: h, child: child),
+              ),
+            );
+          },
+        ),
         theme: ThemeData.dark().copyWith(
           scaffoldBackgroundColor: bg,
           colorScheme: const ColorScheme.dark(primary: accent),
@@ -292,7 +304,33 @@ class _SetupState extends State<Setup> {
   }
 
   @override
-  Widget build(BuildContext c) => Scaffold(
+  Widget build(BuildContext c) {
+    if (Cfg.gs('cfg_load', 'detailed') == 'simple') {
+      return Scaffold(
+        body: Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            logoImg(90),
+            const SizedBox(height: 18),
+            if (err == null) const CircularProgressIndicator(color: accent),
+            const SizedBox(height: 14),
+            Text(err ?? status,
+                style: TextStyle(color: err != null ? Colors.redAccent : Colors.white70)),
+            if (err != null)
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                TextButton(onPressed: run, child: const Text('RETRY')),
+                TextButton(
+                    onPressed: () => Navigator.pushReplacement(
+                        context, MaterialPageRoute(builder: (_) => const Login())),
+                    child: const Text('LOGIN')),
+              ]),
+          ]),
+        ),
+      );
+    }
+    return _detailed(c);
+  }
+
+  Widget _detailed(BuildContext c) => Scaffold(
         body: SafeArea(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 36),
@@ -463,32 +501,14 @@ class _HomeState extends State<Home> {
 
   String expiry() {
     final e = s.info['exp_date'];
-    if (e == null) return 'Unlimited';
+    if (e == null || '$e' == 'null' || '$e'.isEmpty) return 'Unlimited';
     final n = int.tryParse('$e');
     if (n == null) return '$e';
     final d = DateTime.fromMillisecondsSinceEpoch(n * 1000);
-    const m = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    return '${m[d.month - 1]} ${d.day}, ${d.year}';
+    return '${monthFull[d.month - 1]} ${d.day}, ${d.year}';
   }
 
   String get conns => '${s.info['active_cons'] ?? 0}/${s.info['max_connections'] ?? 1}';
-
-  void account() => showDialog(
-        context: context,
-        builder: (d) => AlertDialog(
-          title: const Text('Account'),
-          content: Text('Username: ${s.user}\nStatus: ${s.info['status'] ?? ''}\n'
-              'Connections: $conns\nExpiry: ${expiry()}'),
-          actions: [
-            TextButton(autofocus: true, onPressed: () => Navigator.pop(d), child: const Text('OK'))
-          ],
-        ),
-      );
-
-  void refreshAll() {
-    s.live.start(force: true);
-    s.movie.start(force: true).then((_) => s.series.start(force: true));
-  }
 
   Widget sub(Lib l, String unit) => ValueListenableBuilder<int>(
         valueListenable: l.tick,
@@ -496,48 +516,51 @@ class _HomeState extends State<Home> {
           if (l.total > 0) Cfg.saveCount(l.type, l.total);
           final n = l.total > 0 ? l.total : Cfg.counts[l.type] ?? 0;
           final txt = n > 0 ? '$n $unit' : unit;
-          return Text(txt, style: const TextStyle(color: Colors.white60, fontSize: 14));
+          return Text(txt, style: const TextStyle(color: Colors.white60, fontSize: 16));
         },
       );
 
-  Widget tile(String t, String emoji, Color col, String type, Lib l, String unit,
-          {bool first = false, bool badge = false}) =>
+  Widget tile(Widget art, Widget label, String title, Color col, String type, Lib l, String unit,
+          {bool first = false}) =>
       Expanded(
         flex: 3,
         child: FocusCard(
           autofocus: first,
+          radius: 28,
           onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => Browse(s, type))),
           child: Column(children: [
             Expanded(
               child: Center(
                 child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  Text(emoji, style: const TextStyle(fontSize: 62)),
-                  if (badge)
+                  Stack(alignment: Alignment.center, children: [
                     Container(
-                      margin: const EdgeInsets.only(top: 6),
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                      decoration: BoxDecoration(
-                          color: const Color(0xFFE53935), borderRadius: BorderRadius.circular(3)),
-                      child: const Text('LIVE',
-                          style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [
+                        BoxShadow(color: col.withAlpha(70), blurRadius: 60, spreadRadius: 22),
+                      ]),
                     ),
+                    art,
+                  ]),
+                  const SizedBox(height: 10),
+                  label,
                 ]),
               ),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 12, 14),
+              padding: const EdgeInsets.fromLTRB(20, 0, 14, 16),
               child: Row(children: [
-                Container(width: 3, height: 40, color: col),
-                const SizedBox(width: 12),
+                Container(width: 3, height: 46, color: col),
+                const SizedBox(width: 14),
                 Expanded(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text(t, style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+                    Text(title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
                     sub(l, unit),
                   ]),
                 ),
                 InkResponse(
                   onTap: () => l.start(force: true),
-                  child: Icon(Icons.refresh, size: 18, color: col),
+                  child: Icon(Icons.refresh, size: 20, color: col),
                 ),
               ]),
             ),
@@ -545,38 +568,58 @@ class _HomeState extends State<Home> {
         ),
       );
 
+  Widget plainLabel(String t) =>
+      Text(t, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold));
+
+  Widget liveLabel() => Row(mainAxisSize: MainAxisSize.min, children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+          decoration:
+              BoxDecoration(color: const Color(0xFFE53935), borderRadius: BorderRadius.circular(3)),
+          child: const Text('LIVE', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+        ),
+        const SizedBox(width: 6),
+        const Text('TV', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+      ]);
+
   Widget quick(IconData i, String t, VoidCallback f) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
+        padding: const EdgeInsets.symmetric(vertical: 4),
         child: FocusCard(
           margin: EdgeInsets.zero,
-          radius: 14,
+          radius: 16,
           onTap: f,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
             child: Row(children: [
-              CircleAvatar(
-                  radius: 17, backgroundColor: const Color(0x33FFFFFF), child: Icon(i, size: 18)),
-              const SizedBox(width: 12),
-              Expanded(child: Text(t, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600))),
+              Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: const Color(0xFF1E2030),
+                    border: Border.all(color: Colors.white38, width: 1.5)),
+                child: Icon(i, size: 24),
+              ),
+              const SizedBox(width: 14),
+              Expanded(child: Text(t, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500))),
             ]),
           ),
         ),
       );
 
   Widget quickPanel() => Expanded(
-        flex: 2,
+        flex: 3,
         child: Container(
           margin: const EdgeInsets.all(6),
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(color: card, borderRadius: BorderRadius.circular(20)),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(color: card, borderRadius: BorderRadius.circular(28)),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text('QUICK ACCESS',
-                style: TextStyle(color: Colors.white54, fontSize: 11, letterSpacing: 2)),
+                style: TextStyle(color: Colors.white54, fontSize: 13, letterSpacing: 2.5)),
             const SizedBox(height: 8),
-            quick(Icons.grid_view, 'Multiscreen',
+            quick(Icons.space_dashboard_outlined, 'Multiscreen',
                 () => Navigator.push(context, MaterialPageRoute(builder: (_) => MultiScreen(s)))),
-            quick(Icons.timeline, 'EPG Timeline',
-                () => Navigator.push(context, MaterialPageRoute(builder: (_) => EpgTimeline(s)))),
+            quick(Icons.event_note_outlined, 'Install EPG', () => installEpgDialog(context, s)),
             quick(Icons.history, 'Catch Up',
                 () => Navigator.push(
                     context, MaterialPageRoute(builder: (_) => EpgTimeline(s, catchup: true)))),
@@ -584,66 +627,84 @@ class _HomeState extends State<Home> {
         ),
       );
 
-  Widget stat(String k, String v, {Color? col}) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+  Widget stat(String k, String v, {Color? col, Color? lc}) => Row(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
         children: [
-          Text(k, style: const TextStyle(color: Colors.white54, fontSize: 11, letterSpacing: 1)),
-          const SizedBox(height: 2),
-          Text(v, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: col)),
+          Text(k, style: TextStyle(color: lc ?? Colors.white54, fontSize: 15, letterSpacing: 1.5)),
+          const SizedBox(width: 10),
+          Text(v, style: TextStyle(fontSize: 17, color: col)),
         ],
       );
 
   @override
   Widget build(BuildContext c) {
+    final status = '${s.info['status'] ?? ''}';
     return Scaffold(
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
           child: Column(children: [
             Row(children: [
-              logoImg(44),
-              const SizedBox(width: 12),
-              const Text('Streamivo', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+              logoImg(48),
               const Spacer(),
-              rb(Icons.person_outline, account),
+              rb(Icons.person, () => Navigator.push(
+                  c, MaterialPageRoute(builder: (_) => AccountPage(s)))),
+              rb(Icons.shield_outlined, () => parentalDialog(c)),
               rb(Icons.settings, () => Navigator.push(
                   c, MaterialPageRoute(builder: (_) => const SettingsPage()))),
-              rb(Icons.refresh, refreshAll),
               rb(Icons.logout, () => doLogout(c)),
             ]),
             const SizedBox(height: 8),
             Expanded(
               child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                tile('Live TV', '📺', Colors.redAccent, 'live', s.live, 'Channels',
-                    first: true, badge: true),
-                tile('Movies', '🍿', Colors.lightBlueAccent, 'movie', s.movie, 'Movies'),
-                tile('Series', '🎬', Colors.purpleAccent, 'series', s.series, 'Series'),
+                tile(const TvIcon(84), liveLabel(), 'Live TV', Colors.redAccent, 'live', s.live,
+                    'Channels', first: true),
+                tile(const PopcornIcon(76), plainLabel('Movies'), 'Movies', Colors.lightBlueAccent,
+                    'movie', s.movie, 'Movies'),
+                tile(const ClapperIcon(96), plainLabel('Series'), 'Series', Colors.purpleAccent,
+                    'series', s.series, 'Series'),
                 quickPanel(),
               ]),
             ),
             const SizedBox(height: 8),
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              decoration: BoxDecoration(color: card, borderRadius: BorderRadius.circular(20)),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+              decoration: BoxDecoration(color: card, borderRadius: BorderRadius.circular(28)),
               child: Row(children: [
                 Expanded(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     const Text('DASHBOARD',
-                        style: TextStyle(color: Colors.white54, fontSize: 11, letterSpacing: 2)),
+                        style: TextStyle(color: Colors.white54, fontSize: 13, letterSpacing: 2.5)),
                     const SizedBox(height: 2),
                     Text(s.user,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                        style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
                   ]),
                 ),
-                stat('CONNECTIONS', conns),
-                const SizedBox(width: 24),
-                stat('STATUS', '${s.info['status'] ?? ''}', col: Colors.greenAccent),
-                const SizedBox(width: 24),
-                stat('EXPIRY DATE', expiry()),
+                Flexible(
+                  flex: 2,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerRight,
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      stat('CONNECTIONS', conns),
+                      const SizedBox(width: 26),
+                      stat('STATUS', status, col: const Color(0xFF2EC27E)),
+                      const SizedBox(width: 26),
+                      Container(
+                          width: 7,
+                          height: 7,
+                          decoration: const BoxDecoration(
+                              shape: BoxShape.circle, color: Color(0xFF2EC27E))),
+                      const SizedBox(width: 10),
+                      stat('EXPIRY DATE:', expiry(), lc: const Color(0xFF2EC27E)),
+                    ]),
+                  ),
+                ),
               ]),
             ),
           ]),

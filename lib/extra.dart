@@ -235,15 +235,32 @@ class _MultiState extends State<MultiScreen> {
     );
   }
 
+  Widget grid() {
+    Widget r(List<int> ks, [int flex = 1]) =>
+        Expanded(flex: flex, child: Row(children: [for (final k in ks) cell(k)]));
+    switch (Cfg.layout) {
+      case 1:
+        return Column(children: [r([0], 3), r([1, 2, 3], 2)]);
+      case 2:
+        return Column(children: [r([0]), r([1, 2])]);
+      case 3:
+        return Column(children: [r([0, 1]), r([2])]);
+      case 4:
+        return SizedBox.expand(
+            child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [cell(0), cell(1)]));
+      case 5:
+        return Column(children: [r([0]), r([1])]);
+      default:
+        return Column(children: [r([0, 1]), r([2, 3])]);
+    }
+  }
+
   @override
   Widget build(BuildContext c) => Scaffold(
         backgroundColor: Colors.black,
         body: SafeArea(
           child: Stack(children: [
-            Column(children: [
-              Expanded(child: Row(children: [cell(0), cell(1)])),
-              Expanded(child: Row(children: [cell(2), cell(3)])),
-            ]),
+            grid(),
             Positioned(
               bottom: 8,
               left: 0,
@@ -257,7 +274,11 @@ class _MultiState extends State<MultiScreen> {
 
 // ---------------- EPG Timeline + Catch Up ----------------
 String _two(int n) => n.toString().padLeft(2, '0');
-String _hm(DateTime d) => '${_two(d.hour)}:${_two(d.minute)}';
+String _hm(DateTime d) {
+  if (!Cfg.h12) return '${_two(d.hour)}:${_two(d.minute)}';
+  final h = d.hour % 12 == 0 ? 12 : d.hour % 12;
+  return '$h:${_two(d.minute)} ${d.hour < 12 ? 'AM' : 'PM'}';
+}
 const _wd = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const _mo = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 String _dm(DateTime d) => '${_wd[d.weekday - 1]} ${d.day} ${_mo[d.month - 1]}';
@@ -307,12 +328,19 @@ class _EpgState extends State<EpgTimeline> {
         }
       }
       out.sort((a, b) => ts(a['start_timestamp']).compareTo(ts(b['start_timestamp'])));
+      final hrs = int.tryParse(Cfg.gs('epg_hours', '0')) ?? 0;
+      final shown = hrs <= 0
+          ? out
+          : out.where((e) {
+              final a = ts(e['start_timestamp']) + shiftSec, b = ts(e['stop_timestamp']) + shiftSec;
+              return b > nowSec - hrs * 3600 && a < nowSec + hrs * 3600;
+            }).toList();
       if (!mounted) return;
       setState(() {
-        rows = out;
+        rows = shown;
         loading = false;
       });
-      var cur = out.indexWhere((e) =>
+      var cur = shown.indexWhere((e) =>
           ts(e['start_timestamp']) + shiftSec <= nowSec && ts(e['stop_timestamp']) + shiftSec > nowSec);
       if (cur < 0) cur = 0;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -336,14 +364,15 @@ class _EpgState extends State<EpgTimeline> {
     final past = stop + shiftSec <= nowSec;
     final c = ch!;
     if (isNow) {
-      playItems(context, widget.s, [livePiOf(widget.s, c.id, c.name)], 0, true);
+      playItems(context, widget.s, [livePiOf(widget.s, c.id, c.name)], 0, true, kind: 'guide');
       return;
     }
     final arch = '${e['has_archive']}' == '1';
     if (past && (arch || widget.catchup)) {
       final mins = ((stop - start) / 60).ceil().clamp(1, 600).toInt();
       final url = widget.s.catchupUrl(c.id, '${e['start'] ?? ''}', mins);
-      playItems(context, widget.s, [Pi(title.isEmpty ? c.name : title, url)], 0, false);
+      playItems(context, widget.s, [Pi(title.isEmpty ? c.name : title, url)], 0, false,
+          kind: 'catchup');
       return;
     }
     final s0 = DateTime.fromMillisecondsSinceEpoch((start + shiftSec) * 1000);
@@ -378,7 +407,7 @@ class _EpgState extends State<EpgTimeline> {
         selectedTileColor: Colors.white10,
         selectedColor: accent,
         leading: SizedBox(
-          width: 86,
+          width: Cfg.h12 ? 150 : 86,
           child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(_dm(s0), style: const TextStyle(fontSize: 11, color: Colors.white54)),
             Text('${_hm(s0)} - ${_hm(s1)}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),

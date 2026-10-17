@@ -8,8 +8,9 @@ import 'core.dart';
 // Opens the built-in player, or an external app when selected in Settings.
 // Returns true when the built-in player was used.
 Future<bool> playItems(BuildContext c, Session s, List<Pi> list, int idx, bool live,
-    {ValueChanged<int>? onIndex, VideoPlayerController? initial}) async {
-  if (Cfg.playerMode == 'external') {
+    {ValueChanged<int>? onIndex, VideoPlayerController? initial, String kind = ''}) async {
+  final kd = kind.isEmpty ? (live ? 'live' : 'movie') : kind;
+  if (Cfg.gs('pl_$kd', Cfg.playerMode) == 'external') {
     final pi = list[idx];
     final pkg = Cfg.externalApp == 'vlc'
         ? 'org.videolan.vlc'
@@ -658,6 +659,21 @@ class _PlayerState extends State<Player> {
                           child: Text(err ?? 'A stream error occurred.',
                               textAlign: TextAlign.center))),
                 if (!pip && (show || hasErr)) Positioned.fill(child: overlay(v)),
+                if (!pip && Cfg.gb('dbg_overlay', false) && v != null && v.value.isInitialized)
+                  Positioned(
+                    left: 10,
+                    top: 10,
+                    child: Container(
+                      padding: const EdgeInsets.all(6),
+                      color: Colors.black54,
+                      child: Text(
+                          '${v.value.size.width.toInt()}x${v.value.size.height.toInt()}   '
+                          'pos ${fmt(v.value.position)}   '
+                          'buf ${v.value.buffered.isEmpty ? '-' : fmt(v.value.buffered.last.end)}'
+                          '${v.value.isBuffering ? '   buffering' : ''}',
+                          style: const TextStyle(fontSize: 12, color: Colors.greenAccent)),
+                    ),
+                  ),
                 if (!pip && osd != null)
                   Center(
                     child: Container(
