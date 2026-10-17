@@ -202,7 +202,7 @@ class _BrowseState extends State<Browse> {
       });
       return;
     }
-    final c = VideoPlayerController.networkUrl(Uri.parse(url));
+    final c = VideoPlayerController.networkUrl(Uri.parse(url), httpHeaders: ua);
     try {
       await c.initialize();
       if (!mounted || my != pgen) {

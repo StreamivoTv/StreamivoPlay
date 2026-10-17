@@ -347,7 +347,7 @@ class _LoginState extends State<Login> {
     if (s == null) {
       setState(() {
         busy = false;
-        err = 'Login failed. Check your username, password and internet connection.';
+        err = 'Login failed.\n$loginDiag';
       });
       return;
     }

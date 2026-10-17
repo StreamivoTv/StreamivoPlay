@@ -121,7 +121,7 @@ class _PlayerState extends State<Player> {
     });
     await disposeLater(old);
     if (!mounted || my != gen) return;
-    final c = VideoPlayerController.networkUrl(Uri.parse(url));
+    final c = VideoPlayerController.networkUrl(Uri.parse(url), httpHeaders: ua);
     try {
       await c.initialize();
       if (!mounted || my != gen) {

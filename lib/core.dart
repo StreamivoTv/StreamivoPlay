@@ -19,6 +19,12 @@ const servers = [
 // (get one at themoviedb.org). Leave empty to show cast names only.
 const tmdbKey = '';
 
+// Many IPTV panels block Dart's default User-Agent, so look like a normal player
+const ua = {'User-Agent': 'VLC/3.0.20 LibVLC/3.0.20', 'Accept': '*/*'};
+
+// Last login failure details (shown on the login screen)
+String loginDiag = '';
+
 const bg = Color(0xFF0B0B12);
 const card = Color(0xFF16162A);
 const accent = Color(0xFFFF6A4D);
@@ -415,19 +421,19 @@ class Session {
       '$host/player_api.php?username=$u&password=$p&action=$action$extra';
 
   Future<List> list(String action, [String extra = '', int secs = 60]) async {
-    final r = await http.get(Uri.parse(api(action, extra))).timeout(Duration(seconds: secs));
+    final r = await http.get(Uri.parse(api(action, extra)), headers: ua).timeout(Duration(seconds: secs));
     final d = await compute(_decode, r.body);
     return d is List ? d : [];
   }
 
   Future<Map> infoOf(String action, String extra) async {
-    final r = await http.get(Uri.parse(api(action, extra))).timeout(const Duration(seconds: 30));
+    final r = await http.get(Uri.parse(api(action, extra)), headers: ua).timeout(const Duration(seconds: 30));
     final d = await compute(_decode, r.body);
     return d is Map ? d : {};
   }
 
   Future<List<It>> fetchItems(String action, String extra, String type, [int secs = 120]) async {
-    final r = await http.get(Uri.parse(api(action, extra))).timeout(Duration(seconds: secs));
+    final r = await http.get(Uri.parse(api(action, extra)), headers: ua).timeout(Duration(seconds: secs));
     return compute(parseItems, <dynamic>[r.body, type]);
   }
 
@@ -468,17 +474,29 @@ Pi livePiOf(Session s, String id, String title) {
 // Tries all 3 servers one by one; the first one that accepts the login is used
 Future<Session?> tryLogin(String user, String pass) async {
   final u = Uri.encodeComponent(user), p = Uri.encodeComponent(pass);
+  final notes = <String>[];
   for (final h in servers) {
+    final name = Uri.parse(h).host;
     try {
       final r = await http
-          .get(Uri.parse('$h/player_api.php?username=$u&password=$p'))
-          .timeout(const Duration(seconds: 8));
-      final d = jsonDecode(r.body);
+          .get(Uri.parse('$h/player_api.php?username=$u&password=$p'), headers: ua)
+          .timeout(const Duration(seconds: 15));
+      final body = r.body.replaceFirst('\uFEFF', '').trim();
+      final d = jsonDecode(body);
       if (d is Map && d['user_info'] is Map && '${d['user_info']['auth']}' == '1') {
+        loginDiag = '';
         return Session(h, user, pass, d['user_info']);
       }
-    } catch (_) {}
+      notes.add('$name: HTTP ${r.statusCode}, login not accepted');
+    } on TimeoutException {
+      notes.add('$name: timeout');
+    } catch (e) {
+      var m = '$e';
+      if (m.length > 70) m = m.substring(0, 70);
+      notes.add('$name: $m');
+    }
   }
+  loginDiag = notes.join('\n');
   return null;
 }
 
