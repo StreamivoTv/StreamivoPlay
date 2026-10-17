@@ -5,7 +5,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 
@@ -251,12 +250,22 @@ class Lib {
     return _job ??= _run();
   }
 
-  Future<String> _path() async =>
-      '${(await getTemporaryDirectory()).path}/lib_${type}_${s.user.hashCode.abs()}.tsv';
+  Future<String?> _path() async {
+    try {
+      var dir = await nat('cacheDir');
+      if (dir is! String || dir.isEmpty) dir = Directory.systemTemp.path;
+      if (!Directory('$dir').existsSync()) return null;
+      return '$dir/lib_${type}_${s.user.hashCode.abs()}.tsv';
+    } catch (_) {
+      return null;
+    }
+  }
 
   Future<void> _dropCache() async {
     try {
-      final f = File(await _path());
+      final path = await _path();
+      if (path == null) return;
+      final f = File(path);
       if (f.existsSync()) f.deleteSync();
     } catch (_) {}
   }
@@ -290,8 +299,11 @@ class Lib {
 
   Future<void> _runCats(int ep) async {
     final path = await _path();
-    final f = File(path);
-    if (f.existsSync() && DateTime.now().difference(f.statSync().modified).inHours < 12) {
+    final f = path == null ? null : File(path);
+    if (path != null &&
+        f != null &&
+        f.existsSync() &&
+        DateTime.now().difference(f.statSync().modified).inHours < 12) {
       final l = await compute(readCache, path);
       if (ep != _epoch) return;
       if (l.isNotEmpty) {
@@ -302,9 +314,9 @@ class Lib {
         return;
       }
     }
-    final tmp = File('$path.part');
+    final tmp = path == null ? null : File('$path.part');
     try {
-      if (tmp.existsSync()) tmp.deleteSync();
+      if (tmp != null && tmp.existsSync()) tmp.deleteSync();
     } catch (_) {}
     final ids = [for (final c in cats) '${c['category_id']}'];
     var done = 0, next = 0;
@@ -324,7 +336,7 @@ class Lib {
           if (ep != _epoch) return;
           byCat[ids[k]] = l;
           _all = null;
-          if (l.isNotEmpty) {
+          if (l.isNotEmpty && tmp != null) {
             final data = l.map((e) => e.line).join();
             wq = wq.then((_) => tmp.writeAsString(data, mode: FileMode.append)).catchError((_) {
               bad = true;
@@ -349,13 +361,15 @@ class Lib {
     if (ep != _epoch) return;
     if (!bad && complete) {
       try {
-        if (f.existsSync()) f.deleteSync();
-        if (tmp.existsSync()) tmp.renameSync(path);
+        if (path != null && f != null && tmp != null) {
+          if (f.existsSync()) f.deleteSync();
+          if (tmp.existsSync()) tmp.renameSync(path);
+        }
       } catch (_) {}
       full = true;
     } else {
       try {
-        if (tmp.existsSync()) tmp.deleteSync();
+        if (tmp != null && tmp.existsSync()) tmp.deleteSync();
       } catch (_) {}
       if (bad) {
         failed = true;
