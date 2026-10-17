@@ -8,7 +8,7 @@ import 'core.dart';
 // Opens the built-in player, or an external app when selected in Settings.
 // Returns true when the built-in player was used.
 Future<bool> playItems(BuildContext c, Session s, List<Pi> list, int idx, bool live,
-    {ValueChanged<int>? onIndex}) async {
+    {ValueChanged<int>? onIndex, VideoPlayerController? initial}) async {
   if (Cfg.playerMode == 'external') {
     final pi = list[idx];
     final pkg = Cfg.externalApp == 'vlc'
@@ -23,7 +23,7 @@ Future<bool> playItems(BuildContext c, Session s, List<Pi> list, int idx, bool l
   }
   if (!c.mounted) return false;
   await Navigator.push(
-      c, MaterialPageRoute(builder: (_) => Player(s, list, idx, live, onIndex: onIndex)));
+      c, MaterialPageRoute(builder: (_) => Player(s, list, idx, live, onIndex: onIndex, initial: initial)));
   return true;
 }
 
@@ -33,7 +33,9 @@ class Player extends StatefulWidget {
   final int index;
   final bool live;
   final ValueChanged<int>? onIndex;
-  const Player(this.s, this.items, this.index, this.live, {this.onIndex, super.key});
+  final VideoPlayerController? initial;
+  const Player(this.s, this.items, this.index, this.live,
+      {this.onIndex, this.initial, super.key});
   @override
   State<Player> createState() => _PlayerState();
 }
@@ -76,7 +78,21 @@ class _PlayerState extends State<Player> {
       if (v is double) bright = v;
     });
     loadEpg();
-    play(cur.url, cur.alt);
+    final pre = widget.initial;
+    if (pre != null && pre.value.isInitialized) {
+      // Continue the stream that is already playing (no reload)
+      vc = pre;
+      loading = false;
+      pre.addListener(() {
+        if (mounted) setState(() {});
+      });
+      if (!pre.value.isPlaying) pre.play();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) poke();
+      });
+    } else {
+      play(cur.url, cur.alt);
+    }
   }
 
   @override
@@ -111,7 +127,9 @@ class _PlayerState extends State<Player> {
     });
   }
 
-  Future<void> play(String url, String? alt) async {
+  String lastErr = '';
+
+  Future<void> play(String url, String? alt, {int attempt = 0}) async {
     final my = ++gen;
     final old = vc;
     setState(() {
@@ -121,9 +139,12 @@ class _PlayerState extends State<Player> {
     });
     await disposeLater(old);
     if (!mounted || my != gen) return;
-    final c = VideoPlayerController.networkUrl(Uri.parse(url), httpHeaders: ua);
+    final real = widget.live ? url : await resolveFinal(url);
+    if (!mounted || my != gen) return;
+    final c = VideoPlayerController.networkUrl(Uri.parse(real),
+        httpHeaders: attempt == 1 ? const <String, String>{} : ua);
     try {
-      await c.initialize();
+      await c.initialize().timeout(const Duration(seconds: 40));
       if (!mounted || my != gen) {
         await c.dispose();
         return;
@@ -139,15 +160,23 @@ class _PlayerState extends State<Player> {
         loading = false;
       });
       poke();
-    } catch (_) {
-      await c.dispose();
+    } catch (e) {
+      try {
+        await c.dispose();
+      } catch (_) {}
       if (!mounted || my != gen) return;
-      if (alt != null) {
+      lastErr = '$e';
+      if (attempt == 0 && !widget.live) {
+        // second try without custom headers
+        play(url, alt, attempt: 1);
+      } else if (alt != null) {
         play(alt, null);
       } else {
+        var m = lastErr.replaceAll('\n', ' ');
+        if (m.length > 160) m = m.substring(0, 160);
         setState(() {
           loading = false;
-          err = 'Unable to play this stream. Please try again.';
+          err = 'Unable to play this stream. Please try again.\n$m';
         });
       }
     }
@@ -622,26 +651,13 @@ class _PlayerState extends State<Player> {
                 if (v != null && v.value.isInitialized) video(v),
                 if (loading || (v != null && v.value.isBuffering))
                   const Center(child: CircularProgressIndicator()),
-                if (hasErr) Center(child: Text(err ?? 'A stream error occurred.')),
-                if (!pip && (show || hasErr)) Positioned.fill(child: overlay(v)),
-                if (!pip && widget.live && show && v != null && menu == null)
+                if (hasErr)
                   Center(
-                    child: IgnorePointer(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 16),
-                        decoration: BoxDecoration(
-                            color: const Color(0xE6181824),
-                            border: Border.all(color: Colors.white12),
-                            borderRadius: BorderRadius.circular(16)),
-                        child: Column(mainAxisSize: MainAxisSize.min, children: [
-                          Text('Channel ID: ${cur.id ?? ''}',
-                              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 6),
-                          Text('${bufPct(v)}%', style: const TextStyle(fontSize: 16)),
-                        ]),
-                      ),
-                    ),
-                  ),
+                      child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 40),
+                          child: Text(err ?? 'A stream error occurred.',
+                              textAlign: TextAlign.center))),
+                if (!pip && (show || hasErr)) Positioned.fill(child: overlay(v)),
                 if (!pip && osd != null)
                   Center(
                     child: Container(

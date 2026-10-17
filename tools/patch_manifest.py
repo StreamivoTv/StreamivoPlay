@@ -217,3 +217,43 @@ src = open(files[0], encoding='utf-8').read()
 pkg = re.search(r'^package\s+[\w.]+', src, re.M).group(0)
 open(files[0], 'w', encoding='utf-8').write(pkg + '\n' + KOTLIN)
 print('MainActivity patched:', files[0])
+
+# ---------- 4. Signing with a fixed key (same signature on every build) ----------
+import os as _os
+KS = 'tools/streamivo.p12'
+for gp in ['android/app/build.gradle.kts', 'android/app/build.gradle']:
+    if not _os.path.exists(gp):
+        continue
+    g = open(gp, encoding='utf-8').read()
+    if KS in g or not _os.path.exists(KS):
+        break
+    kts = gp.endswith('.kts')
+    if kts:
+        sc = (
+            '    signingConfigs {\n        create("release") {\n'
+            '            storeFile = file("../../tools/streamivo.p12")\n'
+            '            storePassword = "streamivo2026"\n'
+            '            keyAlias = "streamivo"\n'
+            '            keyPassword = "streamivo2026"\n'
+            '            storeType = "pkcs12"\n        }\n    }\n\n'
+        )
+        use = 'signingConfig = signingConfigs.getByName("release")'
+    else:
+        sc = (
+            '    signingConfigs {\n        release {\n'
+            '            storeFile file("../../tools/streamivo.p12")\n'
+            '            storePassword "streamivo2026"\n'
+            '            keyAlias "streamivo"\n'
+            '            keyPassword "streamivo2026"\n'
+            '            storeType "pkcs12"\n        }\n    }\n\n'
+        )
+        use = 'signingConfig signingConfigs.release'
+    if 'buildTypes {' in g:
+        g2 = g.replace('    buildTypes {', sc + '    buildTypes {', 1)
+        g2 = re.sub(r'signingConfig\s*=?\s*signingConfigs\.(?:getByName\("debug"\)|debug)', use, g2)
+        if g2 != g:
+            open(gp, 'w', encoding='utf-8').write(g2)
+            print('Signing patched:', gp)
+        else:
+            print('WARNING: signing patch skipped (pattern not found)')
+    break

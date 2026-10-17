@@ -16,13 +16,16 @@ const servers = [
 
 // Optional: put a free TMDB API key here to show cast photos and roles
 // (get one at themoviedb.org). Leave empty to show cast names only.
-const tmdbKey = '';
+const tmdbKey = '3bf6a5f0d7d9ddf8027b98ca0dd3c655';
 
 // Many IPTV panels block Dart's default User-Agent, so look like a normal player
 const ua = {'User-Agent': 'VLC/3.0.20 LibVLC/3.0.20', 'Accept': '*/*'};
 
 // Last login failure details (shown on the login screen)
 String loginDiag = '';
+
+// UI zoom on phones (1.0 = original size)
+const double uiScale = 0.75;
 
 const bg = Color(0xFF0B0B12);
 const card = Color(0xFF16162A);
@@ -85,6 +88,32 @@ class SharedPreferences {
   }
 }
 
+// Follows redirects by hand (the video engine refuses http -> https redirects)
+Future<String> resolveFinal(String url) async {
+  final hc = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+  try {
+    var u = Uri.parse(url);
+    for (var i = 0; i < 6; i++) {
+      final rq = await hc.getUrl(u).timeout(const Duration(seconds: 8));
+      rq.followRedirects = false;
+      ua.forEach((k, v) => rq.headers.set(k, v));
+      rq.headers.set('Range', 'bytes=0-0');
+      final rs = await rq.close().timeout(const Duration(seconds: 10));
+      final loc = rs.headers.value('location');
+      if (rs.statusCode >= 300 && rs.statusCode < 400 && loc != null) {
+        u = u.resolve(loc);
+        continue;
+      }
+      return u.toString();
+    }
+    return u.toString();
+  } catch (_) {
+    return url;
+  } finally {
+    hc.close(force: true);
+  }
+}
+
 // ---------------- Native bridge ----------------
 const MethodChannel _ch = MethodChannel('streamivo/native');
 bool isTv = false;
@@ -113,15 +142,34 @@ class Cfg {
   static String externalApp = 'ask'; // ask | vlc | mx
   static String liveFormat = 'default'; // default | m3u8 | ts
   static String fit = 'contain'; // contain | cover | fill
+  static String catchupFmt = 'ts'; // ts | m3u8
+  static int epgShift = 0; // hours added to guide times
+
+  static final Map<String, int> counts = {};
+
+  static Future<void> saveCount(String type, int n) async {
+    if (counts[type] == n) return;
+    counts[type] = n;
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString('cnt_$type', '$n');
+    } catch (_) {}
+  }
 
   static Future<void> load() async {
     final p = await SharedPreferences.getInstance();
+    for (final t in ['live', 'movie', 'series']) {
+      final v = int.tryParse(p.getString('cnt_$t') ?? '');
+      if (v != null) counts[t] = v;
+    }
     autoLogin = p.getBool('cfg_auto') ?? true;
     startScreen = p.getString('cfg_start') ?? 'home';
     playerMode = p.getString('cfg_player') ?? 'builtin';
     externalApp = p.getString('cfg_ext') ?? 'ask';
     liveFormat = p.getString('cfg_fmt') ?? 'default';
     fit = p.getString('cfg_fit') ?? 'contain';
+    catchupFmt = p.getString('cfg_cu') ?? 'ts';
+    epgShift = int.tryParse(p.getString('cfg_shift') ?? '') ?? 0;
   }
 
   static Future<void> save() async {
@@ -132,6 +180,8 @@ class Cfg {
     await p.setString('cfg_ext', externalApp);
     await p.setString('cfg_fmt', liveFormat);
     await p.setString('cfg_fit', fit);
+    await p.setString('cfg_cu', catchupFmt);
+    await p.setString('cfg_shift', '$epgShift');
   }
 }
 
@@ -160,6 +210,8 @@ Future<void> disposeLater(VideoPlayerController? c) async {
   await WidgetsBinding.instance.endOfFrame;
   await c.dispose();
 }
+
+String b64d(String s) => _b64(s);
 
 String _b64(String s) {
   try {
@@ -461,11 +513,15 @@ class Lib {
   }
 }
 
+Session? gSession;
+
 // ---------------- Session ----------------
 class Session {
   final String host, user, pass;
   final Map info;
-  Session(this.host, this.user, this.pass, this.info);
+  Session(this.host, this.user, this.pass, this.info) {
+    gSession = this;
+  }
 
   late final Lib live = Lib(this, 'live');
   late final Lib movie = Lib(this, 'movie');
@@ -508,6 +564,14 @@ class Session {
     } catch (_) {
       return [];
     }
+  }
+
+  // Catch-up (timeshift) link: start = 'YYYY-MM-DD HH:MM:SS' as given by the guide
+  String catchupUrl(String id, String start, int minutes) {
+    final st = start.length >= 16
+        ? '${start.substring(0, 10)}:${start.substring(11, 13)}-${start.substring(14, 16)}'
+        : start;
+    return '$host/timeshift/$u/$p/$minutes/$st/$id.${Cfg.catchupFmt}';
   }
 
   String liveUrl(String id, [String ext = 'm3u8']) => '$host/live/$u/$p/$id.$ext';

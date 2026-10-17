@@ -100,7 +100,9 @@ class _DetailState extends State<DetailPage> {
       if (e is! Map) continue;
       final t = clean(e['title']);
       final x = clean(e['container_extension']);
-      out.add(Pi(t.isEmpty ? it.name : t, s.seriesUrl('${e['id']}', x.isEmpty ? 'mp4' : x)));
+      final xe = x.isEmpty ? 'mp4' : x;
+      out.add(Pi(t.isEmpty ? it.name : t, s.seriesUrl('${e['id']}', xe),
+          s.seriesUrl('${e['id']}', xe == 'mp4' ? 'mkv' : 'mp4')));
     }
     return out;
   }
@@ -117,7 +119,8 @@ class _DetailState extends State<DetailPage> {
       if (l.isNotEmpty) watch(l, 0);
     } else {
       final ext = movieExt.isEmpty ? it.ext : movieExt;
-      watch([Pi(it.name, s.movieUrl(it.id, ext))], 0);
+      final ex = ext.isEmpty ? 'mp4' : ext;
+      watch([Pi(it.name, s.movieUrl(it.id, ex), s.movieUrl(it.id, ex == 'mp4' ? 'mkv' : 'mp4'))], 0);
     }
   }
 
@@ -208,12 +211,12 @@ class _DetailState extends State<DetailPage> {
           child: bk.isEmpty
               ? Container(color: bg)
               : ImageFiltered(
-                  imageFilter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+                  imageFilter: ImageFilter.blur(sigmaX: 1.2, sigmaY: 1.2),
                   child: Image.network(bk,
                       fit: BoxFit.cover, errorBuilder: (_, __, ___) => Container(color: bg)),
                 ),
         ),
-        Positioned.fill(child: Container(color: Colors.black.withAlpha(185))),
+        Positioned.fill(child: Container(color: Colors.black.withAlpha(120))),
         SafeArea(
           child: Column(children: [
             Padding(

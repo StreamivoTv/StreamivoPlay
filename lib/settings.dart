@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'core.dart';
+import 'extra.dart';
 
 class _Item {
   final IconData icon;
@@ -45,7 +46,15 @@ class _SettingsState extends State<SettingsPage> {
         ),
       );
 
-  void soon(String title) => info(title, 'This feature is coming soon.');
+  void needLogin() => info('Not ready', 'Please log in first.');
+
+  static const cuOpts = [
+    ['ts', 'MPEGTS (.ts)'],
+    ['m3u8', 'HLS (.m3u8)'],
+  ];
+  static final shiftOpts = [
+    for (var h = -12; h <= 12; h++) ['$h', h == 0 ? 'No shift' : '${h > 0 ? '+' : ''}$h hours']
+  ];
 
   Future<void> general() async {
     await showDialog(
@@ -124,12 +133,24 @@ class _SettingsState extends State<SettingsPage> {
             () => choose('External Players', extOpts, Cfg.externalApp, (v) => Cfg.externalApp = v)),
         _Item(Icons.table_chart_outlined, 'Stream Format', label(fmtOpts, Cfg.liveFormat),
             () => choose('Stream Format', fmtOpts, Cfg.liveFormat, (v) => Cfg.liveFormat = v)),
-        _Item(Icons.history, 'Catchup Stream Format', 'Coming soon', () => soon('Catchup Stream Format')),
-        _Item(Icons.grid_view, 'Multi-screen', 'Coming soon', () => soon('Multi-screen')),
+        _Item(Icons.history, 'Catchup Stream Format', label(cuOpts, Cfg.catchupFmt),
+            () => choose('Catchup Stream Format', cuOpts, Cfg.catchupFmt, (v) => Cfg.catchupFmt = v)),
+        _Item(Icons.grid_view, 'Multi-screen', 'Watch up to 4 channels at once', () {
+          final g = gSession;
+          if (g == null) return needLogin();
+          Navigator.push(context, MaterialPageRoute(builder: (_) => MultiScreen(g)));
+        }),
         _Item(Icons.view_agenda_outlined, 'EPG Source', 'Where guide data comes from',
             () => info('EPG Source', 'Guide data (Now / Next) is loaded from your provider.')),
-        _Item(Icons.schedule, 'EPG Time Shift', 'Coming soon', () => soon('EPG Time Shift')),
-        _Item(Icons.timeline, 'EPG Timeline', 'Coming soon', () => soon('EPG Timeline')),
+        _Item(Icons.schedule, 'EPG Time Shift',
+            Cfg.epgShift == 0 ? 'No shift' : '${Cfg.epgShift > 0 ? '+' : ''}${Cfg.epgShift} hours',
+            () => choose('EPG Time Shift', shiftOpts, '${Cfg.epgShift}',
+                (v) => Cfg.epgShift = int.tryParse(v) ?? 0)),
+        _Item(Icons.timeline, 'EPG Timeline', 'Guide for any channel, with catch-up', () {
+          final g = gSession;
+          if (g == null) return needLogin();
+          Navigator.push(context, MaterialPageRoute(builder: (_) => EpgTimeline(g)));
+        }),
       ];
 
   @override

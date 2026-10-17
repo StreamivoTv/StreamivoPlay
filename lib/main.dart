@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'browse.dart';
 import 'core.dart';
+import 'extra.dart';
 import 'settings.dart';
 
 Future<void> main() async {
@@ -90,6 +91,25 @@ class StreamivoApp extends StatelessWidget {
   Widget build(BuildContext c) => MaterialApp(
         title: 'Streamivo',
         debugShowCheckedModeBanner: false,
+        builder: (ctx, child) {
+          // Whole UI is drawn a bit smaller so more fits on the phone screen
+          final k = isTv ? 1.0 : uiScale;
+          if (child == null || k == 1.0) return child ?? const SizedBox();
+          final mq = MediaQuery.of(ctx);
+          final w = mq.size.width / k, h = mq.size.height / k;
+          return MediaQuery(
+            data: mq.copyWith(
+              size: Size(w, h),
+              padding: mq.padding / k,
+              viewPadding: mq.viewPadding / k,
+              viewInsets: mq.viewInsets / k,
+            ),
+            child: FittedBox(
+              fit: BoxFit.fill,
+              child: SizedBox(width: w, height: h, child: child),
+            ),
+          );
+        },
         theme: ThemeData.dark().copyWith(
           scaffoldBackgroundColor: bg,
           colorScheme: const ColorScheme.dark(primary: accent),
@@ -218,11 +238,10 @@ class _SetupState extends State<Setup> {
       go(2, 25, 'Loading categories...');
       await Future.wait([sess.live.loadCats(), sess.movie.loadCats(), sess.series.loadCats()]);
       done(2);
-      go(3, 45, 'Loading latest...');
-      await sess.live.start();
+      go(3, 80, 'Loading latest...');
+      sess.live.start();
       done(3);
       go(4, 95, 'Almost ready...');
-      await Future.delayed(const Duration(milliseconds: 300));
       done(4);
       if (!mounted) return;
       setState(() => pct = 100);
@@ -474,25 +493,93 @@ class _HomeState extends State<Home> {
   Widget sub(Lib l, String unit) => ValueListenableBuilder<int>(
         valueListenable: l.tick,
         builder: (_, __, ___) {
-          var txt = l.total == 0 && !l.full ? 'Loading...' : '${l.total} $unit';
-          if (!l.full && l.total > 0 && l.type != 'live') {
-            txt += '  (${(l.progress * 100).round()}%)';
-          }
-          return Text(txt, style: const TextStyle(color: Colors.white54, fontSize: 13));
+          if (l.total > 0) Cfg.saveCount(l.type, l.total);
+          final n = l.total > 0 ? l.total : Cfg.counts[l.type] ?? 0;
+          final txt = n > 0 ? '$n $unit' : unit;
+          return Text(txt, style: const TextStyle(color: Colors.white60, fontSize: 14));
         },
       );
 
-  Widget tile(String t, IconData i, Color col, String type, Widget subW, {bool first = false}) =>
+  Widget tile(String t, String emoji, Color col, String type, Lib l, String unit,
+          {bool first = false, bool badge = false}) =>
       Expanded(
+        flex: 3,
         child: FocusCard(
           autofocus: first,
           onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => Browse(s, type))),
-          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-            Icon(i, size: 56, color: col),
+          child: Column(children: [
+            Expanded(
+              child: Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Text(emoji, style: const TextStyle(fontSize: 62)),
+                  if (badge)
+                    Container(
+                      margin: const EdgeInsets.only(top: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                      decoration: BoxDecoration(
+                          color: const Color(0xFFE53935), borderRadius: BorderRadius.circular(3)),
+                      child: const Text('LIVE',
+                          style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
+                    ),
+                ]),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 12, 14),
+              child: Row(children: [
+                Container(width: 3, height: 40, color: col),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(t, style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+                    sub(l, unit),
+                  ]),
+                ),
+                InkResponse(
+                  onTap: () => l.start(force: true),
+                  child: Icon(Icons.refresh, size: 18, color: col),
+                ),
+              ]),
+            ),
+          ]),
+        ),
+      );
+
+  Widget quick(IconData i, String t, VoidCallback f) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: FocusCard(
+          margin: EdgeInsets.zero,
+          radius: 14,
+          onTap: f,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+            child: Row(children: [
+              CircleAvatar(
+                  radius: 17, backgroundColor: const Color(0x33FFFFFF), child: Icon(i, size: 18)),
+              const SizedBox(width: 12),
+              Expanded(child: Text(t, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600))),
+            ]),
+          ),
+        ),
+      );
+
+  Widget quickPanel() => Expanded(
+        flex: 2,
+        child: Container(
+          margin: const EdgeInsets.all(6),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(color: card, borderRadius: BorderRadius.circular(20)),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('QUICK ACCESS',
+                style: TextStyle(color: Colors.white54, fontSize: 11, letterSpacing: 2)),
             const SizedBox(height: 8),
-            Text(t, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 4),
-            subW,
+            quick(Icons.grid_view, 'Multiscreen',
+                () => Navigator.push(context, MaterialPageRoute(builder: (_) => MultiScreen(s)))),
+            quick(Icons.timeline, 'EPG Timeline',
+                () => Navigator.push(context, MaterialPageRoute(builder: (_) => EpgTimeline(s)))),
+            quick(Icons.history, 'Catch Up',
+                () => Navigator.push(
+                    context, MaterialPageRoute(builder: (_) => EpgTimeline(s, catchup: true)))),
           ]),
         ),
       );
@@ -528,11 +615,11 @@ class _HomeState extends State<Home> {
             const SizedBox(height: 8),
             Expanded(
               child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                tile('Live TV', Icons.live_tv, Colors.redAccent, 'live', sub(s.live, 'Channels'),
-                    first: true),
-                tile('Movies', Icons.movie, Colors.lightBlueAccent, 'movie', sub(s.movie, 'Movies')),
-                tile('Series', Icons.video_library, Colors.purpleAccent, 'series',
-                    sub(s.series, 'Series')),
+                tile('Live TV', '📺', Colors.redAccent, 'live', s.live, 'Channels',
+                    first: true, badge: true),
+                tile('Movies', '🍿', Colors.lightBlueAccent, 'movie', s.movie, 'Movies'),
+                tile('Series', '🎬', Colors.purpleAccent, 'series', s.series, 'Series'),
+                quickPanel(),
               ]),
             ),
             const SizedBox(height: 8),

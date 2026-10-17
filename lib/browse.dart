@@ -242,10 +242,20 @@ class _BrowseState extends State<Browse> {
     final src = idx >= 0 ? List<It>.of(shown) : <It>[cur];
     if (idx < 0) idx = 0;
     final list = [for (final x in src) livePiOf(s, x.id, x.name)];
-    // The account allows only a few connections, so the preview is stopped first
-    await stopPreview();
+    // Hand the already-running preview to the player so it does not reload
+    VideoPlayerController? carry;
+    if (Cfg.playerMode != 'external' && pv != null && pv!.value.isInitialized) {
+      pgen++;
+      carry = pv;
+      setState(() {
+        pv = null;
+        pLoading = false;
+      });
+    } else {
+      await stopPreview();
+    }
     if (!mounted) return;
-    final builtin = await playItems(context, s, list, idx, true, onIndex: (n) {
+    final builtin = await playItems(context, s, list, idx, true, initial: carry, onIndex: (n) {
       sel = src[n];
       addRecent(src[n]);
     });
@@ -452,12 +462,6 @@ class _BrowseState extends State<Browse> {
                 },
               ),
             ),
-            if (!live && !lib.full && lib.progress > 0)
-              Padding(
-                padding: const EdgeInsets.all(6),
-                child: Text('Indexing library... ${(lib.progress * 100).round()}%',
-                    style: const TextStyle(fontSize: 12, color: Colors.white54)),
-              ),
           ]);
         },
       );
