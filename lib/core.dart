@@ -5,7 +5,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 
 // ---- Your 3 servers (customers never see these) ----
@@ -28,6 +27,63 @@ String loginDiag = '';
 const bg = Color(0xFF0B0B12);
 const card = Color(0xFF16162A);
 const accent = Color(0xFFFF6A4D);
+
+
+// ---------------- Simple local storage (no plugin, never hangs) ----------------
+class SharedPreferences {
+  static SharedPreferences? _i;
+  final Map<String, dynamic> _m = {};
+  File? _f;
+
+  static Future<SharedPreferences> getInstance() async {
+    if (_i != null) return _i!;
+    final s = SharedPreferences();
+    try {
+      final f = File('${Directory.systemTemp.path}/streamivo_prefs.json');
+      s._f = f;
+      if (f.existsSync()) {
+        final d = jsonDecode(f.readAsStringSync());
+        if (d is Map) s._m.addAll(Map<String, dynamic>.from(d));
+      }
+    } catch (_) {}
+    _i = s;
+    return s;
+  }
+
+  void _save() {
+    try {
+      _f?.writeAsStringSync(jsonEncode(_m), flush: true);
+    } catch (_) {}
+  }
+
+  String? getString(String k) => _m[k] is String ? _m[k] as String : null;
+  bool? getBool(String k) => _m[k] is bool ? _m[k] as bool : null;
+  List<String>? getStringList(String k) =>
+      _m[k] is List ? [for (final x in _m[k] as List) '$x'] : null;
+  Future<bool> setString(String k, String v) async {
+    _m[k] = v;
+    _save();
+    return true;
+  }
+
+  Future<bool> setBool(String k, bool v) async {
+    _m[k] = v;
+    _save();
+    return true;
+  }
+
+  Future<bool> setStringList(String k, List<String> v) async {
+    _m[k] = v;
+    _save();
+    return true;
+  }
+
+  Future<bool> remove(String k) async {
+    _m.remove(k);
+    _save();
+    return true;
+  }
+}
 
 // ---------------- Native bridge ----------------
 const MethodChannel _ch = MethodChannel('streamivo/native');
