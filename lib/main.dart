@@ -115,9 +115,17 @@ class _SplashState extends State<Splash> {
     boot();
   }
 
+  String? bootErr;
+
   Future<void> boot() async {
-    final pr = await SharedPreferences.getInstance();
-    final u = pr.getString('u'), pw = pr.getString('p');
+    String? u, pw;
+    try {
+      final pr = await SharedPreferences.getInstance().timeout(const Duration(seconds: 5));
+      u = pr.getString('u');
+      pw = pr.getString('p');
+    } catch (e) {
+      bootErr = '$e';
+    }
     if (!mounted) return;
     final go = Cfg.autoLogin && u != null && pw != null;
     Navigator.pushReplacement(
