@@ -32,6 +32,12 @@ s = re.sub(
 )
 s = re.sub(r'android:label="[^"]*"', 'android:label="Streamivo"', s)
 
+s = s.replace(
+    '</application>',
+    '    <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false"/>\n    </application>',
+    1,
+)
+
 assert 'LEANBACK_LAUNCHER' in s, 'LEANBACK_LAUNCHER patch failed'
 assert 'android:banner' in s, 'banner patch failed'
 assert 'sensorLandscape' in s, 'orientation patch failed'
@@ -156,6 +162,9 @@ class MainActivity : FlutterActivity() {
                     lp.screenBrightness = -1f
                     window.attributes = lp
                     result.success(null)
+                }
+                "cacheDir" -> {
+                    result.success(cacheDir.absolutePath)
                 }
                 "isTv" -> {
                     val ui = getSystemService(Context.UI_MODE_SERVICE) as UiModeManager

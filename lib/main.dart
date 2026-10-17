@@ -7,12 +7,73 @@ import 'settings.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await SystemChrome.setPreferredOrientations(
-      [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
-  initNative();
-  isTv = (await nat('isTv')) == true;
-  await Cfg.load();
-  runApp(const StreamivoApp());
+  ErrorWidget.builder = (d) => Material(
+        color: bg,
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Text('Error: ${d.exceptionAsString()}',
+                style: const TextStyle(color: Colors.white70)),
+          ),
+        ),
+      );
+  runApp(const Boot());
+}
+
+/// Shows something immediately (no black screen), then initialises.
+class Boot extends StatefulWidget {
+  const Boot({super.key});
+  @override
+  State<Boot> createState() => _BootState();
+}
+
+class _BootState extends State<Boot> {
+  bool ready = false;
+  String? err;
+
+  @override
+  void initState() {
+    super.initState();
+    init();
+  }
+
+  Future<void> init() async {
+    try {
+      try {
+        await SystemChrome.setPreferredOrientations(
+            [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
+      } catch (_) {}
+      initNative();
+      try {
+        isTv = (await nat('isTv').timeout(const Duration(seconds: 3))) == true;
+      } catch (_) {}
+      try {
+        await Cfg.load().timeout(const Duration(seconds: 5));
+      } catch (_) {}
+      if (mounted) setState(() => ready = true);
+    } catch (e, st) {
+      if (mounted) setState(() => err = '$e\n$st');
+    }
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    if (ready) return const StreamivoApp();
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: Scaffold(
+        backgroundColor: bg,
+        body: Center(
+          child: err != null
+              ? Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: SingleChildScrollView(
+                      child: Text(err!, style: const TextStyle(color: Colors.white70))))
+              : const CircularProgressIndicator(color: accent),
+        ),
+      ),
+    );
+  }
 }
 
 Future<void> doLogout(BuildContext c) async {
