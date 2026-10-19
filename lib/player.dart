@@ -105,7 +105,7 @@ class _PlayerState extends State<Player> {
     vc?.dispose();
     WakelockPlus.disable();
     nat('resetBrightness');
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: SystemUiOverlay.values);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     super.dispose();
   }
 

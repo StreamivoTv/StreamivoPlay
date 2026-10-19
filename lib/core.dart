@@ -120,6 +120,13 @@ Future<String> resolveFinal(String url) async {
   }
 }
 
+// Hides status bar + navigation buttons; they come back only when the screen edge is swiped
+void hideBars() {
+  try {
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  } catch (_) {}
+}
+
 // ---------------- Native bridge ----------------
 const MethodChannel _ch = MethodChannel('streamivo/native');
 bool isTv = false;
@@ -769,32 +776,41 @@ Future<int> checkServers() async {
   return r.where((x) => x).length;
 }
 
-// Tries all 3 servers one by one; the first one that accepts the login is used
+// Tries all 3 servers one by one; the first one that accepts the login is used.
+// loginDiag is a SHORT message for the screen (no server names, no technical text).
 Future<Session?> tryLogin(String user, String pass) async {
   final u = Uri.encodeComponent(user), p = Uri.encodeComponent(pass);
-  final notes = <String>[];
+  var answered = false, rejected = false;
   for (final h in servers) {
-    final name = Uri.parse(h).host;
     try {
       final r = await http
           .get(Uri.parse('$h/player_api.php?username=$u&password=$p'), headers: ua)
           .timeout(const Duration(seconds: 15));
+      answered = true;
+      if (r.statusCode == 401 || r.statusCode == 403) {
+        rejected = true;
+        continue;
+      }
       final body = r.body.replaceFirst('\uFEFF', '').trim();
       final d = jsonDecode(body);
-      if (d is Map && d['user_info'] is Map && '${d['user_info']['auth']}' == '1') {
-        loginDiag = '';
-        return Session(h, user, pass, d['user_info']);
+      if (d is Map && d['user_info'] is Map) {
+        if ('${d['user_info']['auth']}' == '1') {
+          loginDiag = '';
+          return Session(h, user, pass, d['user_info']);
+        }
+        rejected = true;
       }
-      notes.add('$name: HTTP ${r.statusCode}, login not accepted');
     } on TimeoutException {
-      notes.add('$name: timeout');
-    } catch (e) {
-      var m = '$e';
-      if (m.length > 70) m = m.substring(0, 70);
-      notes.add('$name: $m');
+      // no answer from this server
+    } on FormatException {
+      answered = true; // server answered with a web page, not with account data
+    } catch (_) {
+      // no connection to this server
     }
   }
-  loginDiag = notes.join('\n');
+  loginDiag = rejected
+      ? 'Username or Password Failed'
+      : (answered ? 'Server Error. Try again later.' : 'No Internet Connection');
   return null;
 }
 
@@ -863,7 +879,7 @@ Future<List<Map>> tmdbCast(String kind, String id) async {
 
 // ---------------- Shared widgets ----------------
 Widget logoImg(double s) => ClipRRect(
-      borderRadius: BorderRadius.circular(s * 0.2),
+      borderRadius: BorderRadius.circular(s * 0.26),
       child: Image.asset('assets/logo.png', width: s, height: s),
     );
 
@@ -891,8 +907,9 @@ class GradBtn extends StatefulWidget {
   final VoidCallback? onTap;
   final bool busy, outline;
   final IconData? icon;
+  final double height;
   const GradBtn(this.text, this.onTap,
-      {this.busy = false, this.outline = false, this.icon, super.key});
+      {this.busy = false, this.outline = false, this.icon, this.height = 48, super.key});
   @override
   State<GradBtn> createState() => _GradBtnState();
 }
@@ -907,7 +924,7 @@ class _GradBtnState extends State<GradBtn> {
         borderRadius: BorderRadius.circular(16),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 120),
-          height: 48,
+          height: widget.height,
           decoration: BoxDecoration(
             gradient: widget.outline
                 ? null

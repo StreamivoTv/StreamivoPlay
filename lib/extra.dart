@@ -105,7 +105,7 @@ class _MultiState extends State<MultiScreen> {
     for (final c in vc) {
       c?.dispose();
     }
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: SystemUiOverlay.values);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     super.dispose();
   }
 

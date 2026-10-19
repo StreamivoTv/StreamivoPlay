@@ -7,6 +7,7 @@ import 'browse.dart';
 import 'core.dart';
 import 'extra.dart';
 import 'fx.dart';
+import 'recent.dart';
 import 'settings.dart';
 
 Future<void> main() async {
@@ -40,14 +41,26 @@ class Boot extends StatefulWidget {
   State<Boot> createState() => _BootState();
 }
 
-class _BootState extends State<Boot> {
+class _BootState extends State<Boot> with WidgetsBindingObserver {
   bool ready = false;
   String? err;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     init();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState st) {
+    if (st == AppLifecycleState.resumed) hideBars();
   }
 
   Future<void> init() async {
@@ -56,6 +69,7 @@ class _BootState extends State<Boot> {
         await SystemChrome.setPreferredOrientations(
             [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
       } catch (_) {}
+      hideBars();
       initNative();
       try {
         isTv = (await nat('isTv').timeout(const Duration(seconds: 3))) == true;
@@ -90,11 +104,64 @@ class _BootState extends State<Boot> {
 }
 
 Future<void> doLogout(BuildContext c) async {
+  final ok = await showDialog<bool>(
+    context: c,
+    builder: (dc) => Dialog(
+      backgroundColor: const Color(0xFF1C1C1E),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 60, vertical: 16),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(22, 16, 22, 18),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('Logout?', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 10),
+          const Divider(color: Colors.white24, height: 1),
+          const SizedBox(height: 14),
+          const Align(
+              alignment: Alignment.centerLeft,
+              child: Text('Are you sure you want to logout?',
+                  style: TextStyle(fontSize: 18, color: Colors.white70))),
+          const SizedBox(height: 16),
+          Row(children: [
+            Expanded(child: _dlgBtn('Yes', const Color(0xFF40201F), const Color(0xFFE0524A), const Color(0xFFE0524A), () => Navigator.pop(dc, true))),
+            const SizedBox(width: 14),
+            Expanded(child: _dlgBtn('NO', const Color(0xFF343437), Colors.white24, Colors.white, () => Navigator.pop(dc, false), auto: true)),
+          ]),
+        ]),
+      ),
+    ),
+  );
+  if (ok != true || !c.mounted) return;
   final pr = await SharedPreferences.getInstance();
   await pr.remove('u');
   await pr.remove('p');
   if (c.mounted) {
     Navigator.pushAndRemoveUntil(c, MaterialPageRoute(builder: (_) => const Login()), (_) => false);
+  }
+}
+
+Widget _dlgBtn(String t, Color fill, Color line, Color text, VoidCallback f, {bool auto = false}) =>
+    InkWell(
+      autofocus: auto,
+      onTap: f,
+      borderRadius: BorderRadius.circular(26),
+      focusColor: Colors.white12,
+      child: Container(
+        height: 46,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+            color: fill,
+            borderRadius: BorderRadius.circular(26),
+            border: Border.all(color: line, width: 1.5)),
+        child: Text(t, style: TextStyle(fontSize: 18, color: text, letterSpacing: 0.5)),
+      ),
+    );
+
+// Opens the dashboard (and the Live screen first if that is the chosen start screen)
+void openHome(NavigatorState nav, Session s) {
+  nav.pushReplacement(MaterialPageRoute(builder: (_) => Home(s)));
+  if (Cfg.startScreen == 'live') {
+    nav.push(MaterialPageRoute(builder: (_) => Browse(s, 'live')));
   }
 }
 
@@ -242,7 +309,7 @@ class _SetupState extends State<Setup> {
       s ??= await tryLogin(widget.user ?? '', widget.pass ?? '');
       if (s == null) {
         if (mounted) {
-          setState(() => err = 'Login failed. Check your username, password and internet connection.');
+          setState(() => err = loginDiag.isEmpty ? 'Login Failed' : loginDiag);
         }
         return;
       }
@@ -276,13 +343,14 @@ class _SetupState extends State<Setup> {
       done(4);
       if (!mounted) return;
       setState(() => pct = 100);
-      nav.pushReplacement(MaterialPageRoute(builder: (_) => Home(sess)));
-      if (Cfg.startScreen == 'live') {
-        nav.push(MaterialPageRoute(builder: (_) => Browse(sess, 'live')));
+      if (Cfg.gb('show_recent', true) && sess.movie.full && sess.movie.total > 0) {
+        nav.pushReplacement(MaterialPageRoute(builder: (_) => RecentShow(sess, 'movie')));
+      } else {
+        openHome(nav, sess);
       }
     } catch (_) {
       if (mounted) {
-        setState(() => err = 'Could not load your library. Check your internet connection.');
+        setState(() => err = 'No Internet Connection');
       }
     }
   }
@@ -494,8 +562,12 @@ class _LoginState extends State<Login> {
   }
 
   Future<void> go() async {
-    if (u.text.trim().isEmpty || p.text.isEmpty) {
-      setState(() => err = 'Please enter your username and password.');
+    if (u.text.trim().isEmpty) {
+      setState(() => err = 'Username Required');
+      return;
+    }
+    if (p.text.isEmpty) {
+      setState(() => err = 'Password Required');
       return;
     }
     setState(() {
@@ -507,7 +579,7 @@ class _LoginState extends State<Login> {
     if (s == null) {
       setState(() {
         busy = false;
-        err = 'Login failed.\n$loginDiag';
+        err = loginDiag.isEmpty ? 'Login Failed' : loginDiag;
       });
       return;
     }
@@ -522,75 +594,101 @@ class _LoginState extends State<Login> {
     Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => Setup(session: s)));
   }
 
+  Widget fieldBox(String label, TextEditingController ctl, IconData icon,
+          {bool obscure = false,
+          Widget? suffix,
+          bool auto = false,
+          TextInputAction? act,
+          ValueChanged<String>? onSub}) =>
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(label, style: const TextStyle(color: Colors.white60, fontSize: 13, letterSpacing: 2)),
+        const SizedBox(height: 5),
+        Container(
+          height: 46,
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+              color: const Color(0xFF1B1E30),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.white12, width: 1.5)),
+          child: Row(children: [
+            Container(
+                width: 62,
+                height: 46,
+                color: const Color(0xFF22263A),
+                child: Icon(icon, size: 24)),
+            Expanded(
+              child: TextField(
+                controller: ctl,
+                obscureText: obscure,
+                autofocus: auto,
+                textInputAction: act,
+                onSubmitted: onSub,
+                cursorColor: accent,
+                style: const TextStyle(fontSize: 17),
+                decoration: const InputDecoration(
+                    isCollapsed: true,
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    contentPadding: EdgeInsets.symmetric(horizontal: 14)),
+              ),
+            ),
+            if (suffix != null) suffix,
+          ]),
+        ),
+      ]);
+
   @override
   Widget build(BuildContext c) {
     final form = Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(color: card, borderRadius: BorderRadius.circular(20)),
+      padding: const EdgeInsets.fromLTRB(22, 16, 22, 18),
+      decoration: BoxDecoration(color: card, borderRadius: BorderRadius.circular(26)),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text('Login to your account',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 14),
-          TextField(
-            controller: u,
-            autofocus: true,
-            textInputAction: TextInputAction.next,
-            decoration: const InputDecoration(
-                isDense: true,
-                prefixIcon: Icon(Icons.person_outline),
-                labelText: 'USERNAME',
-                border: OutlineInputBorder()),
-          ),
+              style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
           const SizedBox(height: 10),
-          TextField(
-            controller: p,
-            obscureText: hide,
-            onSubmitted: (_) => go(),
-            decoration: InputDecoration(
-              isDense: true,
-              prefixIcon: const Icon(Icons.lock_outline),
-              labelText: 'PASSWORD',
-              border: const OutlineInputBorder(),
-              suffixIcon: IconButton(
+          fieldBox('USERNAME', u, Icons.person_outline, auto: true, act: TextInputAction.next),
+          const SizedBox(height: 8),
+          fieldBox('PASSWORD', p, Icons.lock, obscure: hide, onSub: (_) => go(),
+              suffix: IconButton(
                 icon: Icon(hide ? Icons.visibility_off : Icons.visibility),
                 onPressed: () => setState(() => hide = !hide),
-              ),
-            ),
-          ),
+              )),
           if (err != null)
             Padding(
               padding: const EdgeInsets.only(top: 8),
-              child: Text(err!, style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
+              child: Text(err!,
+                  style: const TextStyle(color: Colors.redAccent, fontSize: 15, fontWeight: FontWeight.w600)),
             ),
-          const SizedBox(height: 14),
-          GradBtn('LOGIN WITH USER & PASS', go, busy: busy),
           const SizedBox(height: 12),
+          GradBtn('LOGIN WITH USER & PASS', go, busy: busy, height: 56),
+          const SizedBox(height: 10),
           Row(children: const [
             Expanded(child: Divider(color: Colors.white24)),
             Padding(
               padding: EdgeInsets.symmetric(horizontal: 12),
               child: Text('Additional Options',
-                  style: TextStyle(color: Colors.white54, fontSize: 13, letterSpacing: 1)),
+                  style: TextStyle(color: Colors.white54, fontSize: 14, letterSpacing: 1)),
             ),
             Expanded(child: Divider(color: Colors.white24)),
           ]),
           const SizedBox(height: 8),
-          FocusCard(
-            margin: EdgeInsets.zero,
-            radius: 16,
-            onTap: savedDialog,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-              child: Row(children: [
-                const Icon(Icons.people, size: 22),
-                const SizedBox(width: 12),
-                const Expanded(
-                    child: Text('Saved Users',
-                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600))),
-                if (saved.isNotEmpty)
+          if (saved.isNotEmpty) ...[
+            FocusCard(
+              margin: EdgeInsets.zero,
+              radius: 16,
+              onTap: savedDialog,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                child: Row(children: [
+                  const Icon(Icons.people, size: 22),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                      child: Text('Saved Users',
+                          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600))),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                     decoration: BoxDecoration(
@@ -598,18 +696,19 @@ class _LoginState extends State<Login> {
                     child: Text('${saved.length}',
                         style: const TextStyle(color: accent, fontWeight: FontWeight.bold)),
                   ),
-                const SizedBox(width: 6),
-                const Icon(Icons.chevron_right),
-              ]),
+                  const SizedBox(width: 6),
+                  const Icon(Icons.chevron_right),
+                ]),
+              ),
             ),
-          ),
-          const SizedBox(height: 8),
+            const SizedBox(height: 8),
+          ],
           Row(children: [
-            Expanded(child: GradBtn('VPN', openVpn, outline: true, icon: Icons.vpn_key)),
+            Expanded(child: GradBtn('VPN', openVpn, outline: true, icon: Icons.vpn_key, height: 46)),
             const SizedBox(width: 8),
             Expanded(
                 child: GradBtn('REFRESH DNS', refreshDns,
-                    outline: true, icon: Icons.refresh, busy: dnsBusy)),
+                    outline: true, icon: Icons.refresh, busy: dnsBusy, height: 46)),
           ]),
         ],
       ),
@@ -618,13 +717,13 @@ class _LoginState extends State<Login> {
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(14),
             child: Row(mainAxisSize: MainAxisSize.min, children: [
-              logoImg(MediaQuery.of(c).size.height * 0.55),
-              const SizedBox(width: 28),
+              logoImg(MediaQuery.of(c).size.height * 0.62),
+              const SizedBox(width: 30),
               Flexible(
                   child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 400), child: form)),
+                      constraints: const BoxConstraints(maxWidth: 540), child: form)),
             ]),
           ),
         ),
@@ -765,27 +864,34 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
         const Text('TV', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
       ]);
 
-  Widget quick(IconData i, String t, VoidCallback f) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        child: FocusCard(
-          margin: EdgeInsets.zero,
-          radius: 16,
-          onTap: f,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-            child: Row(children: [
-              Container(
-                width: 46,
-                height: 46,
-                decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: const Color(0xFF1E2030),
-                    border: Border.all(color: Colors.white38, width: 1.5)),
-                child: Icon(i, size: 24),
-              ),
-              const SizedBox(width: 14),
-              Expanded(child: Text(t, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500))),
-            ]),
+  Widget quick(IconData i, String t, VoidCallback f) => Expanded(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: FocusCard(
+            margin: EdgeInsets.zero,
+            radius: 16,
+            onTap: f,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              child: Row(children: [
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: const Color(0xFF1E2030),
+                      border: Border.all(color: Colors.white38, width: 1.5)),
+                  child: Icon(i, size: 21),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                    child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: Text(t,
+                            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w500)))),
+              ]),
+            ),
           ),
         ),
       );
@@ -794,12 +900,12 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
         flex: 3,
         child: Container(
           margin: const EdgeInsets.all(6),
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
           decoration: BoxDecoration(color: card, borderRadius: BorderRadius.circular(28)),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text('QUICK ACCESS',
                 style: TextStyle(color: Colors.white54, fontSize: 13, letterSpacing: 2.5)),
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             quick(Icons.space_dashboard_outlined, 'Multiscreen',
                 () => Navigator.push(context, MaterialPageRoute(builder: (_) => MultiScreen(s)))),
             quick(Icons.event_note_outlined, 'Install EPG', () => installEpgDialog(context, s)),
