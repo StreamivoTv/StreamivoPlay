@@ -394,6 +394,8 @@ class Lib {
       _all = null;
       _lastSync = null;
       _syncing = false;
+      quick = null;
+      quickF = null;
       _dropCache();
       tick.value++;
     }
@@ -425,6 +427,86 @@ class Lib {
       (byCat['${i.cat}'] ??= <It>[]).add(i);
     }
     _all = null;
+  }
+
+  // ---- Fast total: the whole list is streamed once and only counted (nothing is kept in memory) ----
+  int? quick;
+  Future<void>? quickF;
+
+  // Counts one request's stream_id/series_id keys without decoding or keeping the body.
+  Future<int?> _countUrl(String url, HttpClient hc) async {
+    final key = type == 'series' ? '"series_id"' : '"stream_id"';
+    final pat = key.codeUnits;
+    try {
+      final rq = await hc.getUrl(Uri.parse(url)).timeout(const Duration(seconds: 15));
+      ua.forEach((k, v) => rq.headers.set(k, v));
+      final rs = await rq.close().timeout(const Duration(seconds: 30));
+      if (rs.statusCode != 200) return null;
+      var n = 0;
+      var tail = <int>[];
+      await for (final chunk in rs.timeout(const Duration(seconds: 40))) {
+        final b = tail.isEmpty ? chunk : [...tail, ...chunk];
+        final last = b.length - pat.length;
+        for (var i = 0; i <= last; i++) {
+          if (b[i] != pat[0]) continue;
+          var j = 1;
+          while (j < pat.length && b[i + j] == pat[j]) {
+            j++;
+          }
+          if (j == pat.length) n++;
+        }
+        final keep = pat.length - 1;
+        tail = b.length > keep ? b.sublist(b.length - keep) : List<int>.of(b);
+      }
+      return n;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Many small per-category requests in parallel finish much sooner than one giant list.
+  Future<int?> _countAll() async {
+    final hc = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final ids = [for (final c in cats) '${c['category_id']}'];
+      if (ids.isEmpty) {
+        final n = await _countUrl(s.api(itemAction[type]!), hc);
+        return (n ?? 0) > 0 ? n : null;
+      }
+      var total = 0, bad = 0, next = 0;
+      Future<void> worker() async {
+        while (next < ids.length) {
+          final id = ids[next++];
+          final n = await _countUrl(s.api(itemAction[type]!, '&category_id=$id'), hc);
+          if (n == null) {
+            bad++;
+          } else {
+            total += n;
+          }
+        }
+      }
+      await Future.wait([for (var w = 0; w < 16; w++) worker()]);
+      if (bad > ids.length ~/ 4) {
+        final n = await _countUrl(s.api(itemAction[type]!), hc);
+        return (n ?? 0) > 0 ? n : null;
+      }
+      return total > 0 ? total : null;
+    } catch (_) {
+      return null;
+    } finally {
+      hc.close(force: true);
+    }
+  }
+
+  Future<void> quickCount() {
+    return quickF ??= () async {
+      final n = await _countAll();
+      if (n != null) {
+        quick = n;
+        Cfg.saveCount(type, n);
+        tick.value++;
+      }
+    }();
   }
 
   Future<void> _run() async {
@@ -484,6 +566,10 @@ class Lib {
     try {
       if (tmp != null && tmp.existsSync()) tmp.deleteSync();
     } catch (_) {}
+    // the total is fetched first; the heavy indexing starts after it (or after 20 s)
+    try {
+      await (quickF ?? Future<void>.value()).timeout(const Duration(seconds: 20));
+    } catch (_) {}
     final ids = [for (final c in cats) '${c['category_id']}'];
     var done = 0, next = 0;
     var bad = false;
@@ -513,10 +599,11 @@ class Lib {
         done++;
         progress = done / ids.length;
         tick.value++;
+        await Future<void>.delayed(const Duration(milliseconds: 40)); // keeps the screen smooth
       }
     }
 
-    await Future.wait([for (var j = 0; j < 8; j++) worker()]);
+    await Future.wait([for (var j = 0; j < 3; j++) worker()]);
     try {
       await wq;
     } catch (_) {
@@ -668,8 +755,29 @@ class Lib {
   }
 
   List<It> recentAdded() {
-    final l = List<It>.of(all)..sort((a, b) => b.added.compareTo(a.added));
-    return l.take(100).toList();
+    final top = <It>[];
+    var minAt = 0, minAdded = 0;
+    for (final i in all) {
+      if (top.length < 100) {
+        top.add(i);
+        if (top.length == 100) {
+          minAt = 0;
+          for (var k = 1; k < 100; k++) {
+            if (top[k].added < top[minAt].added) minAt = k;
+          }
+          minAdded = top[minAt].added;
+        }
+      } else if (i.added > minAdded) {
+        top[minAt] = i;
+        minAt = 0;
+        for (var k = 1; k < 100; k++) {
+          if (top[k].added < top[minAt].added) minAt = k;
+        }
+        minAdded = top[minAt].added;
+      }
+    }
+    top.sort((a, b) => b.added.compareTo(a.added));
+    return top;
   }
 
   List<It> search(String q) {

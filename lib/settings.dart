@@ -766,7 +766,7 @@ class _SettingsState extends State<SettingsPage> {
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
             child: Row(children: [
-              logoImg(54),
+              logoImg(40),
               const Expanded(
                 child: Column(children: [
                   Text('SETTINGS',

@@ -261,7 +261,7 @@ class Setup extends StatefulWidget {
 
 class _SetupState extends State<Setup> {
   static const names = [
-    'Checking servers',
+    'Checking DNS',
     'Fetching config',
     'Loading categories',
     'Loading content',
@@ -323,31 +323,31 @@ class _SetupState extends State<Setup> {
       go(2, 25, 'Loading categories...');
       await Future.wait([sess.live.loadCats(), sess.movie.loadCats(), sess.series.loadCats()]);
       done(2);
-      go(3, 25, 'Loading content...');
-      // Live, movies and series load together while the setup screen shows the progress;
-      // the dashboard then opens with the final totals (nothing keeps counting afterwards).
-      final libs = [sess.live, sess.movie, sess.series];
+      go(3, 30, 'Loading data...');
+      // Live list + a fast count of movies and series. A returning user already has saved totals,
+      // so nothing is waited for; a new user waits only a few seconds. The heavy indexing of
+      // movies and series then runs quietly in the background.
+      final jobs = <Future<void>>[
+        sess.live.start(),
+        if (Cfg.counts['movie'] == null) sess.movie.quickCount(),
+        if (Cfg.counts['series'] == null) sess.series.quickCount(),
+      ];
       var fin = false;
-      Future.wait([for (final l in libs) l.start()]).whenComplete(() => fin = true);
+      Future.wait(jobs).whenComplete(() => fin = true);
+      final quickWait = (Cfg.counts['live'] != null && Cfg.counts['movie'] != null && Cfg.counts['series'] != null) ? 0 : 5;
       final wait = Stopwatch()..start();
-      while (!fin && mounted && wait.elapsed.inSeconds < 240) {
-        await Future<void>.delayed(const Duration(milliseconds: 250));
-        var sum = 0.0;
-        for (final l in libs) {
-          sum += l.full ? 1 : l.progress;
-        }
-        go(3, 25 + 70 * sum / libs.length, 'Loading content...');
+      while (!fin && mounted && wait.elapsed.inSeconds < quickWait) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        go(3, 30 + 60 * (wait.elapsedMilliseconds / (quickWait * 1000)), 'Loading data...');
       }
+      sess.movie.start();
+      sess.series.start();
       done(3);
       go(4, 95, 'Almost ready...');
       done(4);
       if (!mounted) return;
       setState(() => pct = 100);
-      if (Cfg.gb('show_recent', true) && sess.movie.full && sess.movie.total > 0) {
-        nav.pushReplacement(MaterialPageRoute(builder: (_) => RecentShow(sess, 'movie')));
-      } else {
-        openHome(nav, sess);
-      }
+      openHome(nav, sess);
     } catch (_) {
       if (mounted) {
         setState(() => err = 'No Internet Connection');
@@ -359,11 +359,11 @@ class _SetupState extends State<Setup> {
     final isDone = i < cur;
     final isCur = i == cur && err == null;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 7),
+      padding: const EdgeInsets.symmetric(vertical: 9.5),
       child: Row(children: [
         SizedBox(
-          width: 34,
-          height: 34,
+          width: 29,
+          height: 29,
           child: isDone
               ? const CircleAvatar(
                   backgroundColor: Color(0xFF2EC27E),
@@ -381,7 +381,7 @@ class _SetupState extends State<Setup> {
         Expanded(
           child: Text(names[i],
               style: TextStyle(
-                  fontSize: 17, color: isCur ? Colors.white : (isDone ? Colors.white60 : Colors.white38))),
+                  fontSize: 19, color: isCur ? Colors.white : (isDone ? Colors.white60 : Colors.white38))),
         ),
       ]),
     );
@@ -419,16 +419,16 @@ class _SetupState extends State<Setup> {
     return Scaffold(
       body: SafeArea(
         child: Padding(
-          padding: EdgeInsets.symmetric(horizontal: w * 0.08),
+          padding: const EdgeInsets.only(left: 64, right: 110),
           child: Row(children: [
             Expanded(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  logoImg(72),
+                  logoImg(76),
                   const SizedBox(height: 14),
-                  const Text('Setting up your library', style: TextStyle(fontSize: 22)),
+                  const Text('Setting up your library', style: TextStyle(fontSize: 24)),
                   const SizedBox(height: 6),
                   Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
                     Text('${pct.round()}',
@@ -452,7 +452,7 @@ class _SetupState extends State<Setup> {
               ),
             ),
             SizedBox(
-              width: w * 0.30,
+              width: 235,
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [for (var i = 0; i < names.length; i++) stepRow(i)],
@@ -796,7 +796,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           if (l.full && l.total > 0) Cfg.saveCount(l.type, l.total);
           // Everything is loaded on the setup screen, so the dashboard shows the final total at once
           final saved = Cfg.counts[l.type] ?? 0;
-          final n = l.full ? l.total : (l.total > saved ? l.total : saved);
+          final n = l.full ? l.total : (l.quick ?? saved);
           final txt = n > 0 ? '$n $unit' : unit;
           return Text(txt, style: const TextStyle(color: Colors.white60, fontSize: 16));
         },
@@ -927,16 +927,14 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
         ],
       );
 
-  @override
-  Widget build(BuildContext c) {
+  Widget dashboard(BuildContext c) {
     final status = '${s.info['status'] ?? ''}';
-    return Scaffold(
-      body: SafeArea(
+    return SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+          padding: const EdgeInsets.fromLTRB(16, 8, 38, 10),
           child: Column(children: [
             Row(children: [
-              logoImg(72),
+              Padding(padding: const EdgeInsets.only(left: 34, top: 2), child: logoImg(46)),
               const Spacer(),
               rb(Icons.person, () => Navigator.push(
                   c, MaterialPageRoute(builder: (_) => AccountPage(s)))),
@@ -998,6 +996,52 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
             ),
           ]),
         ),
+    );
+  }
+
+  final vc = PageController();
+  int vpage = 0;
+
+  Widget dot(int k) => GestureDetector(
+        onTap: () => vc.animateToPage(k, duration: const Duration(milliseconds: 300), curve: Curves.easeOut),
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 6),
+          width: k == vpage ? 20 : 15,
+          height: k == vpage ? 20 : 15,
+          decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: k == vpage ? accent : const Color(0xFFFFE08A)),
+        ),
+      );
+
+  @override
+  Widget build(BuildContext c) {
+    return PopScope(
+      canPop: vpage == 0,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) {
+          vc.animateToPage(0, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+        }
+      },
+      child: Scaffold(
+        body: Stack(children: [
+          PageView(
+            scrollDirection: Axis.vertical,
+            controller: vc,
+            onPageChanged: (i) => setState(() => vpage = i),
+            children: [
+              dashboard(c),
+              RecentSlides(s, 'movie'),
+              RecentSlides(s, 'series'),
+            ],
+          ),
+          Positioned(
+            right: 12,
+            top: 0,
+            bottom: 0,
+            child: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [dot(0), dot(1), dot(2)])),
+          ),
+        ]),
       ),
     );
   }

@@ -337,11 +337,11 @@ class _BrowseState extends State<Browse> {
   }
 
   Widget topBar() => SizedBox(
-        height: 64,
+        height: 56,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Row(children: [
-            logoImg(56),
+            logoImg(38),
             Expanded(
               child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                 tab('Live', 'live'),

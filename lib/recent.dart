@@ -1,56 +1,50 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'core.dart';
 import 'detail.dart';
-import 'main.dart';
 
-/// "Recently Added Movies / Series" shown right after login: poster, story, rating,
-/// Watch Now and favourite. It moves on by itself (movies -> series -> dashboard) and can be skipped.
-class RecentShow extends StatefulWidget {
+/// One page of the dashboard: "Recently Added Movies / Series" (swipe left-right for the next title).
+/// The dashboard itself scrolls up and down between Home, Recent Movies and Recent Series.
+class RecentSlides extends StatefulWidget {
   final Session s;
   final String type; // movie | series
-  const RecentShow(this.s, this.type, {super.key});
+  const RecentSlides(this.s, this.type, {super.key});
   @override
-  State<RecentShow> createState() => _RecentShowState();
+  State<RecentSlides> createState() => _RecentSlidesState();
 }
 
-class _RecentShowState extends State<RecentShow> {
+class _RecentSlidesState extends State<RecentSlides> {
   Session get s => widget.s;
   bool get movie => widget.type == 'movie';
   Lib get lib => movie ? s.movie : s.series;
-  late final List<It> items = lib.recentAdded();
+  List<It>? items;
   final pc = PageController();
   final Map<String, Map> info = {};
   final Set<String> favs = {};
-  int cur = 0, ticks = 0;
-  Timer? t;
+  int cur = 0;
 
   @override
   void initState() {
     super.initState();
-    if (items.isEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => next());
-      return;
-    }
+    lib.tick.addListener(check);
+    check();
     loadFavs();
-    fetch(0);
-    fetch(1);
-    t = Timer.periodic(const Duration(seconds: 4), (_) {
-      if (!mounted) return;
-      ticks++;
-      if (ticks >= 3) {
-        next();
-      } else {
-        pc.nextPage(duration: const Duration(milliseconds: 350), curve: Curves.easeOut);
-      }
-    });
   }
 
   @override
   void dispose() {
-    t?.cancel();
+    lib.tick.removeListener(check);
     pc.dispose();
     super.dispose();
+  }
+
+  // The list is built once, when the library has finished loading
+  void check() {
+    if (items != null || !lib.full || lib.total == 0) return;
+    final l = lib.recentAdded();
+    if (!mounted) return;
+    setState(() => items = l);
+    fetch(0);
+    fetch(1);
   }
 
   Future<void> loadFavs() async {
@@ -59,8 +53,9 @@ class _RecentShowState extends State<RecentShow> {
   }
 
   Future<void> fetch(int i) async {
-    if (i >= items.length) return;
-    final it = items[i];
+    final l = items;
+    if (l == null || i >= l.length) return;
+    final it = l[i];
     if (info.containsKey(it.id)) return;
     info[it.id] = {};
     try {
@@ -71,35 +66,18 @@ class _RecentShowState extends State<RecentShow> {
     } catch (_) {}
   }
 
-  void next() {
-    t?.cancel();
-    if (!mounted) return;
-    final nav = Navigator.of(context);
-    if (movie && s.series.full && s.series.total > 0) {
-      nav.pushReplacement(MaterialPageRoute(builder: (_) => RecentShow(s, 'series')));
-    } else {
-      openHome(nav, s);
-    }
-  }
-
-  void skip() {
-    t?.cancel();
-    openHome(Navigator.of(context), s);
-  }
-
   Future<void> fav(It it) async {
     final on = await toggleFavOf(widget.type, it);
     if (!mounted) return;
     setState(() => on ? favs.add(it.id) : favs.remove(it.id));
   }
 
-  Future<void> watch(It it) async {
-    t?.cancel();
-    await Navigator.push(context, MaterialPageRoute(builder: (_) => DetailPage(s, it, widget.type)));
+  void watch(It it) {
+    Navigator.push(context, MaterialPageRoute(builder: (_) => DetailPage(s, it, widget.type)));
   }
 
-  Widget slide(int i) {
-    final it = items[i];
+  Widget slide(List<It> l, int i) {
+    final it = l[i];
     final inf = info[it.id] ?? const {};
     final plot = clean(inf['plot'] ?? inf['description']);
     var back = '';
@@ -115,6 +93,8 @@ class _RecentShowState extends State<RecentShow> {
     final stars = r5.round().clamp(0, 5);
     final cat = lib.catName(it.cat);
     final bgUrl = back.isNotEmpty ? back : poster;
+    final mq = MediaQuery.of(context);
+    final f = mq.size.height / 480, w = mq.size.width;
     return Stack(fit: StackFit.expand, children: [
       if (bgUrl.isNotEmpty)
         Image.network(bgUrl, fit: BoxFit.cover, errorBuilder: (_, __, ___) => const SizedBox())
@@ -128,14 +108,14 @@ class _RecentShowState extends State<RecentShow> {
                 colors: [Color(0xE6000000), Color(0x99000000), Color(0x40000000)])),
       ),
       Padding(
-        padding: const EdgeInsets.fromLTRB(44, 62, 44, 56),
+        padding: EdgeInsets.fromLTRB(w * 0.085, 100 * f, w * 0.075, 20 * f),
         child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Column(mainAxisSize: MainAxisSize.min, children: [
             ClipRRect(
               borderRadius: BorderRadius.circular(8),
               child: SizedBox(
-                width: 120,
-                height: 175,
+                width: 180 * f,
+                height: 253 * f,
                 child: poster.isEmpty
                     ? Container(color: card)
                     : Image.network(poster,
@@ -144,13 +124,13 @@ class _RecentShowState extends State<RecentShow> {
                         errorBuilder: (_, __, ___) => Container(color: card)),
               ),
             ),
-            const SizedBox(height: 8),
+            SizedBox(height: 10 * f),
             Row(mainAxisSize: MainAxisSize.min, children: [
               for (var k = 0; k < 5; k++)
-                Icon(Icons.star, size: 18, color: k < stars ? Colors.amber : Colors.white24),
+                Icon(Icons.star, size: 17 * f, color: k < stars ? Colors.amber : Colors.white24),
             ]),
           ]),
-          const SizedBox(width: 22),
+          SizedBox(width: 26 * f),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -158,21 +138,21 @@ class _RecentShowState extends State<RecentShow> {
                   child: Text(cat.isEmpty ? it.name : '${it.name}  \u2022  $cat',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+                      style: TextStyle(fontSize: 22 * f, fontWeight: FontWeight.bold)),
                 ),
                 InkResponse(
                   onTap: () => fav(it),
                   child: Icon(favs.contains(it.id) ? Icons.favorite : Icons.favorite_border,
-                      size: 38, color: favs.contains(it.id) ? Colors.pinkAccent : Colors.white),
+                      size: 46 * f, color: favs.contains(it.id) ? Colors.pinkAccent : Colors.white),
                 ),
               ]),
-              const SizedBox(height: 6),
+              SizedBox(height: 6 * f),
               Text(plot,
-                  maxLines: 4,
+                  maxLines: 3,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 14, color: Colors.white70, height: 1.25)),
+                  style: TextStyle(fontSize: 18 * f, color: Colors.white70, height: 1.2)),
               const Spacer(),
-              SizedBox(width: 190, child: GradBtn('Watch Now', () => watch(it), icon: Icons.play_arrow, height: 42)),
+              SizedBox(width: 266 * f, child: GradBtn('Watch Now', () => watch(it), icon: Icons.play_arrow, height: 52 * f)),
             ]),
           ),
         ]),
@@ -182,68 +162,70 @@ class _RecentShowState extends State<RecentShow> {
 
   @override
   Widget build(BuildContext c) {
-    if (items.isEmpty) return const Scaffold(backgroundColor: Colors.black);
-    final start = (cur ~/ 11) * 11;
-    final end = (start + 11) < items.length ? start + 11 : items.length;
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) skip();
-      },
-      child: Scaffold(
-        backgroundColor: Colors.black,
-        body: Stack(children: [
-          PageView.builder(
-            controller: pc,
-            itemCount: items.length,
-            onPageChanged: (i) {
-              setState(() => cur = i);
-              fetch(i);
-              fetch(i + 1);
-            },
-            itemBuilder: (_, i) => slide(i),
-          ),
-          Positioned(
-            top: 10,
-            left: 0,
-            right: 0,
-            child: Column(children: [
-              Text(movie ? 'Recently Added Movies' : 'Recently Added Series',
-                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w500)),
-              const SizedBox(height: 6),
-              Container(width: 230, height: 2, color: Colors.white54),
-            ]),
-          ),
-          Positioned(
-            top: 8,
-            right: 14,
-            child: TextButton(
-                onPressed: skip,
-                child: const Text('SKIP', style: TextStyle(color: Colors.white70, letterSpacing: 1.5))),
-          ),
-          Positioned(
-            bottom: 8,
-            left: 0,
-            right: 0,
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                for (var k = start; k < end; k++)
-                  Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 5),
-                    width: k == cur ? 14 : 9,
-                    height: k == cur ? 14 : 9,
-                    decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: k == cur ? Colors.lightBlueAccent : Colors.white70),
-                  ),
-              ]),
-              const SizedBox(height: 4),
-              Text('${cur + 1} of ${items.length} Records',
-                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-            ]),
-          ),
+    final title = movie ? 'Recently Added Movies' : 'Recently Added Series';
+    final l = items;
+    if (l == null || l.isEmpty) {
+      return Container(
+        color: Colors.black,
+        alignment: Alignment.center,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text(title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w500)),
+          const SizedBox(height: 16),
+          const SizedBox(
+              width: 26,
+              height: 26,
+              child: CircularProgressIndicator(strokeWidth: 3, color: accent)),
         ]),
-      ),
+      );
+    }
+    final f = MediaQuery.of(c).size.height / 480;
+    final start = (cur ~/ 11) * 11;
+    final end = (start + 11) < l.length ? start + 11 : l.length;
+    return Container(
+      color: Colors.black,
+      child: Stack(children: [
+        PageView.builder(
+          controller: pc,
+          itemCount: l.length,
+          onPageChanged: (i) {
+            setState(() => cur = i);
+            fetch(i);
+            fetch(i + 1);
+          },
+          itemBuilder: (_, i) => slide(l, i),
+        ),
+        Positioned(
+          top: 18 * f,
+          left: 0,
+          right: 0,
+          child: Column(children: [
+            Text(title, style: TextStyle(fontSize: 25 * f, fontWeight: FontWeight.w500)),
+            SizedBox(height: 8 * f),
+            Container(width: 280 * f, height: 2, color: Colors.white54),
+          ]),
+        ),
+        Positioned(
+          bottom: 12 * f,
+          left: 0,
+          right: 0,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              for (var k = start; k < end; k++)
+                Container(
+                  margin: EdgeInsets.symmetric(horizontal: 8 * f),
+                  width: (k == cur ? 17 : 12) * f,
+                  height: (k == cur ? 17 : 12) * f,
+                  decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: k == cur ? Colors.lightBlueAccent : Colors.white70),
+                ),
+            ]),
+            const SizedBox(height: 4),
+            Text('${cur + 1} of ${l.length} Records',
+                style: TextStyle(fontSize: 18 * f, fontWeight: FontWeight.w500)),
+          ]),
+        ),
+      ]),
     );
   }
 }
