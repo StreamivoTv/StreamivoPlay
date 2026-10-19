@@ -60,6 +60,9 @@ LAYER = '''<?xml version="1.0" encoding="utf-8"?>
             <solid android:color="#0B0B12"/>
         </shape>
     </item>
+    <item>
+        <bitmap android:gravity="center" android:src="@drawable/splash_logo"/>
+    </item>
 </layer-list>
 '''
 for d in ['drawable', 'drawable-v21']:
@@ -91,8 +94,10 @@ w(f'{RES}/values/styles.xml', BASE)
 w(f'{RES}/values-night/styles.xml', BASE)
 w(f'{RES}/values-v31/styles.xml', V31)
 w(f'{RES}/values-night-v31/styles.xml', V31)
-os.makedirs(f'{RES}/drawable', exist_ok=True)
-shutil.copy('tv/splash_icon.png', f'{RES}/drawable/splash_icon.png')
+# xxhdpi folders: 480px = 160dp logo (same size as the in-app splash), 864px = 288dp system splash icon
+os.makedirs(f'{RES}/drawable-xxhdpi', exist_ok=True)
+shutil.copy('tv/splash_icon.png', f'{RES}/drawable-xxhdpi/splash_icon.png')
+shutil.copy('tv/splash_logo.png', f'{RES}/drawable-xxhdpi/splash_logo.png')
 
 # ---------- 3. MainActivity (volume, brightness, TV, PiP, external player) ----------
 KOTLIN = '''
@@ -184,6 +189,16 @@ class MainActivity : FlutterActivity() {
                             result.success(false)
                         }
                     } else {
+                        result.success(false)
+                    }
+                }
+                "openVpn" -> {
+                    try {
+                        val i = Intent(Settings.ACTION_VPN_SETTINGS)
+                        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(i)
+                        result.success(true)
+                    } catch (e: Exception) {
                         result.success(false)
                     }
                 }

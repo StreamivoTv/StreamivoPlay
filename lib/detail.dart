@@ -411,12 +411,7 @@ class _DetailState extends State<DetailPage> {
                               child: SizedBox(
                                 width: 150,
                                 height: 225,
-                                child: poster.isEmpty
-                                    ? const NoPoster()
-                                    : Image.network(poster,
-                                        fit: BoxFit.cover,
-                                        cacheWidth: 340,
-                                        errorBuilder: (_, __, ___) => const NoPoster()),
+                                child: PosterImg(poster, cacheW: 340),
                               ),
                             ),
                             const SizedBox(width: 26),

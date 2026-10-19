@@ -604,12 +604,7 @@ class _BrowseState extends State<Browse> {
                     child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
                       Expanded(
                         child: Stack(fit: StackFit.expand, children: [
-                          i.icon.isEmpty
-                              ? const Icon(Icons.movie, size: 40)
-                              : Image.network(i.icon,
-                                  fit: BoxFit.cover,
-                                  cacheWidth: 220,
-                                  errorBuilder: (_, __, ___) => const Icon(Icons.movie, size: 40)),
+                          PosterImg(i.icon),
                           if (favs.containsKey(i.id))
                             const Positioned(
                                 top: 4,

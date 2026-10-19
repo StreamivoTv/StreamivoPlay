@@ -84,7 +84,10 @@ class _AccountState extends State<AccountPage> {
     final maxc = int.tryParse('${s.info['max_connections'] ?? 1}') ?? 1;
     final trial = '${s.info['is_trial']}' == '1';
     final status = clean(s.info['status']).isEmpty ? 'Active' : clean(s.info['status']);
-    final msg = clean(s.info['message']);
+    // The panel often sends the words "API Message" itself: show the heading only once
+    final msg = clean(s.info['message'])
+        .replaceFirst(RegExp(r'^\s*api message\s*', caseSensitive: false), '')
+        .trim();
     final letter = s.user.isEmpty ? '?' : s.user.substring(0, 1).toUpperCase();
 
     final left = Container(

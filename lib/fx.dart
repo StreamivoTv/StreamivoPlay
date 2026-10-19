@@ -571,6 +571,26 @@ class NoPoster extends StatelessWidget {
       );
 }
 
+/// Poster that shows "Poster Not Found" when there is no image, while it is
+/// still loading (slow internet) and when it fails to load.
+class PosterImg extends StatelessWidget {
+  final String url;
+  final int cacheW;
+  const PosterImg(this.url, {this.cacheW = 220, super.key});
+  @override
+  Widget build(BuildContext c) {
+    if (url.trim().isEmpty) return const NoPoster();
+    return Image.network(
+      url,
+      fit: BoxFit.cover,
+      cacheWidth: cacheW,
+      frameBuilder: (ctx, child, frame, sync) =>
+          (sync || frame != null) ? child : const NoPoster(),
+      errorBuilder: (_, __, ___) => const NoPoster(),
+    );
+  }
+}
+
 class _SunPainter extends CustomPainter {
   @override
   void paint(Canvas c, Size s) {

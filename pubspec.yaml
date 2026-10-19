@@ -1,7 +1,7 @@
 name: streamivo
 description: Streamivo IPTV player
 publish_to: none
-version: 1.0.0+1
+version: 1.1.0+1
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -11,6 +11,7 @@ dependencies:
     sdk: flutter
   http: ^1.2.2
   video_player: ^2.9.2
+  fvp: '>=0.30.0 <1.0.0'
   wakelock_plus: ^1.2.8
 
 dev_dependencies:
@@ -25,5 +26,5 @@ flutter_launcher_icons:
   android: true
   ios: false
   image_path: "assets/logo.png"
-  adaptive_icon_background: "#0B0B12"
+  adaptive_icon_background: "assets/icon_bg.png"
   adaptive_icon_foreground: "assets/icon_fg.png"

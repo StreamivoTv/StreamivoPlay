@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:fvp/fvp.dart' as fvp;
 import 'account.dart';
 import 'browse.dart';
 import 'core.dart';
@@ -9,6 +11,15 @@ import 'settings.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // FFmpeg-based engine under video_player: plays AC3 / EAC3 / MP2 / DTS audio that the
+  // phone's own decoder cannot (the cause of channels with picture but no sound)
+  try {
+    fvp.registerWith(options: {
+      'platforms': ['android'],
+      'video.decoders': ['AMediaCodec', 'FFmpeg', 'dav1d'],
+      'audio.decoders': ['FFmpeg'],
+    });
+  } catch (_) {}
   ErrorWidget.builder = (d) => Material(
         color: bg,
         child: Center(
@@ -71,7 +82,7 @@ class _BootState extends State<Boot> {
                   padding: const EdgeInsets.all(20),
                   child: SingleChildScrollView(
                       child: Text(err!, style: const TextStyle(color: Colors.white70))))
-              : const CircularProgressIndicator(color: accent),
+              : logoImg(160),
         ),
       ),
     );
@@ -167,13 +178,8 @@ class _SplashState extends State<Splash> {
 
   @override
   Widget build(BuildContext c) => Scaffold(
-        body: Center(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            logoImg(140),
-            const SizedBox(height: 20),
-            const CircularProgressIndicator(),
-          ]),
-        ),
+        backgroundColor: bg,
+        body: Center(child: logoImg(160)),
       );
 }
 
@@ -250,8 +256,20 @@ class _SetupState extends State<Setup> {
       go(2, 25, 'Loading categories...');
       await Future.wait([sess.live.loadCats(), sess.movie.loadCats(), sess.series.loadCats()]);
       done(2);
-      go(3, 80, 'Loading latest...');
-      sess.live.start();
+      go(3, 60, 'Counting content...');
+      // Totals first (live list + a quick count of movies and series), THEN the
+      // background indexing starts, so nothing counts up on the dashboard.
+      final live = sess.live.start();
+      final jobs = <Future<void>>[
+        if (Cfg.counts['live'] == null) live,
+        if (Cfg.counts['movie'] == null) sess.movie.quickCount(),
+        if (Cfg.counts['series'] == null) sess.series.quickCount(),
+      ];
+      try {
+        await Future.wait(jobs).timeout(const Duration(seconds: 10));
+      } catch (_) {}
+      sess.movie.start();
+      sess.series.start();
       done(3);
       go(4, 95, 'Almost ready...');
       done(4);
@@ -272,7 +290,7 @@ class _SetupState extends State<Setup> {
     final isDone = i < cur;
     final isCur = i == cur && err == null;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 9),
+      padding: const EdgeInsets.symmetric(vertical: 7),
       child: Row(children: [
         SizedBox(
           width: 34,
@@ -294,11 +312,8 @@ class _SetupState extends State<Setup> {
         Expanded(
           child: Text(names[i],
               style: TextStyle(
-                  fontSize: 17, color: isDone || isCur ? Colors.white : Colors.white38)),
+                  fontSize: 17, color: isCur ? Colors.white : (isDone ? Colors.white60 : Colors.white38))),
         ),
-        if (secs[i] != null)
-          Text('${secs[i]!.toStringAsFixed(1)} s',
-              style: const TextStyle(color: Colors.white38, fontSize: 13)),
       ]),
     );
   }
@@ -330,51 +345,71 @@ class _SetupState extends State<Setup> {
     return _detailed(c);
   }
 
-  Widget _detailed(BuildContext c) => Scaffold(
-        body: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 36),
-            child: Row(children: [
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    logoImg(72),
-                    const SizedBox(height: 14),
-                    const Text('Setting up your library', style: TextStyle(fontSize: 22)),
-                    const SizedBox(height: 6),
-                    Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                      Text('${pct.round()}',
-                          style: const TextStyle(fontSize: 60, fontWeight: FontWeight.bold)),
-                      const Padding(
-                        padding: EdgeInsets.only(bottom: 12, left: 4),
-                        child: Text('%', style: TextStyle(fontSize: 22, color: accent)),
-                      ),
+  Widget _detailed(BuildContext c) {
+    final w = MediaQuery.of(c).size.width;
+    return Scaffold(
+      body: SafeArea(
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: w * 0.08),
+          child: Row(children: [
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  logoImg(72),
+                  const SizedBox(height: 14),
+                  const Text('Setting up your library', style: TextStyle(fontSize: 22)),
+                  const SizedBox(height: 6),
+                  Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                    Text('${pct.round()}',
+                        style: const TextStyle(fontSize: 60, fontWeight: FontWeight.bold)),
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 12, left: 4),
+                      child: Text('%', style: TextStyle(fontSize: 22, color: accent)),
+                    ),
+                  ]),
+                  Text(err ?? status,
+                      style: TextStyle(color: err != null ? Colors.redAccent : Colors.white70)),
+                  if (err != null)
+                    Row(children: [
+                      TextButton(onPressed: run, child: const Text('RETRY')),
+                      TextButton(
+                          onPressed: () => Navigator.pushReplacement(
+                              context, MaterialPageRoute(builder: (_) => const Login())),
+                          child: const Text('LOGIN')),
                     ]),
-                    Text(err ?? status,
-                        style: TextStyle(color: err != null ? Colors.redAccent : Colors.white70)),
-                    if (err != null)
-                      Row(children: [
-                        TextButton(onPressed: run, child: const Text('RETRY')),
-                        TextButton(
-                            onPressed: () => Navigator.pushReplacement(
-                                context, MaterialPageRoute(builder: (_) => const Login())),
-                            child: const Text('LOGIN')),
-                      ]),
-                  ],
-                ),
+                ],
               ),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [for (var i = 0; i < names.length; i++) stepRow(i)],
-                ),
+            ),
+            SizedBox(
+              width: w * 0.30,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [for (var i = 0; i < names.length; i++) stepRow(i)],
               ),
-            ]),
-          ),
+            ),
+          ]),
         ),
-      );
+      ),
+    );
+  }
+}
+
+// ---------------- Saved users ----------------
+Future<List<List<String>>> loadSaved() async {
+  final pr = await SharedPreferences.getInstance();
+  final out = <List<String>>[];
+  for (final x in pr.getStringList('saved_users') ?? <String>[]) {
+    final i = x.indexOf('\t');
+    if (i > 0) out.add([x.substring(0, i), x.substring(i + 1)]);
+  }
+  return out;
+}
+
+Future<void> storeSaved(List<List<String>> l) async {
+  final pr = await SharedPreferences.getInstance();
+  await pr.setStringList('saved_users', [for (final e in l) '${e[0]}\t${e[1]}']);
 }
 
 // ---------------- Login ----------------
@@ -386,8 +421,76 @@ class Login extends StatefulWidget {
 
 class _LoginState extends State<Login> {
   final u = TextEditingController(), p = TextEditingController();
-  bool busy = false, hide = true;
+  bool busy = false, hide = true, dnsBusy = false;
   String? err;
+  List<List<String>> saved = [];
+
+  @override
+  void initState() {
+    super.initState();
+    loadSaved().then((l) {
+      if (mounted) setState(() => saved = l);
+    });
+  }
+
+  void toast(String m) => ScaffoldMessenger.of(context)
+    ..hideCurrentSnackBar()
+    ..showSnackBar(SnackBar(content: Text(m)));
+
+  Future<void> savedDialog() async {
+    if (saved.isEmpty) {
+      toast('No saved users yet. Log in once and your account is saved here.');
+      return;
+    }
+    await showDialog(
+      context: context,
+      builder: (dc) => StatefulBuilder(
+        builder: (dc, set) => AlertDialog(
+          backgroundColor: card,
+          title: const Text('Saved Users'),
+          content: SizedBox(
+            width: 340,
+            child: ListView(shrinkWrap: true, children: [
+              for (final e in List<List<String>>.of(saved))
+                ListTile(
+                  leading: const Icon(Icons.person_outline),
+                  title: Text(e[0]),
+                  onTap: () {
+                    Navigator.pop(dc);
+                    u.text = e[0];
+                    p.text = e[1];
+                    go();
+                  },
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline, color: Colors.white54),
+                    onPressed: () async {
+                      saved.removeWhere((x) => x[0] == e[0]);
+                      await storeSaved(saved);
+                      set(() {});
+                      if (mounted) setState(() {});
+                      if (saved.isEmpty && dc.mounted) Navigator.pop(dc);
+                    },
+                  ),
+                ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> openVpn() async {
+    final ok = await nat('openVpn');
+    if (ok != true) toast('Could not open VPN settings on this device.');
+  }
+
+  Future<void> refreshDns() async {
+    setState(() => dnsBusy = true);
+    final n = await checkServers();
+    if (!mounted) return;
+    setState(() => dnsBusy = false);
+    toast(n > 0 ? 'Servers refreshed: $n of ${servers.length} online.' : 'No server answered. Check your internet or try a VPN.');
+  }
 
   Future<void> go() async {
     if (u.text.trim().isEmpty || p.text.isEmpty) {
@@ -410,6 +513,10 @@ class _LoginState extends State<Login> {
     final pr = await SharedPreferences.getInstance();
     await pr.setString('u', s.user);
     await pr.setString('p', s.pass);
+    saved.removeWhere((x) => x[0] == s.user);
+    saved.insert(0, [s.user, s.pass]);
+    if (saved.length > 10) saved.removeRange(10, saved.length);
+    await storeSaved(saved);
     if (!mounted) return;
     Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => Setup(session: s)));
   }
@@ -458,7 +565,51 @@ class _LoginState extends State<Login> {
               child: Text(err!, style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
             ),
           const SizedBox(height: 14),
-          GradBtn('LOGIN', go, busy: busy),
+          GradBtn('LOGIN WITH USER & PASS', go, busy: busy),
+          const SizedBox(height: 12),
+          Row(children: const [
+            Expanded(child: Divider(color: Colors.white24)),
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: 12),
+              child: Text('Additional Options',
+                  style: TextStyle(color: Colors.white54, fontSize: 13, letterSpacing: 1)),
+            ),
+            Expanded(child: Divider(color: Colors.white24)),
+          ]),
+          const SizedBox(height: 8),
+          FocusCard(
+            margin: EdgeInsets.zero,
+            radius: 16,
+            onTap: savedDialog,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              child: Row(children: [
+                const Icon(Icons.people, size: 22),
+                const SizedBox(width: 12),
+                const Expanded(
+                    child: Text('Saved Users',
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600))),
+                if (saved.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                    decoration: BoxDecoration(
+                        color: const Color(0x33FF6A4D), borderRadius: BorderRadius.circular(12)),
+                    child: Text('${saved.length}',
+                        style: const TextStyle(color: accent, fontWeight: FontWeight.bold)),
+                  ),
+                const SizedBox(width: 6),
+                const Icon(Icons.chevron_right),
+              ]),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(children: [
+            Expanded(child: GradBtn('VPN', openVpn, outline: true, icon: Icons.vpn_key)),
+            const SizedBox(width: 8),
+            Expanded(
+                child: GradBtn('REFRESH DNS', refreshDns,
+                    outline: true, icon: Icons.refresh, busy: dnsBusy)),
+          ]),
         ],
       ),
     );
@@ -489,14 +640,42 @@ class Home extends StatefulWidget {
   State<Home> createState() => _HomeState();
 }
 
-class _HomeState extends State<Home> {
+class _HomeState extends State<Home> with WidgetsBindingObserver {
   Session get s => widget.s;
+  Timer? _auto;
 
   @override
   void initState() {
     super.initState();
-    // Movies and series are indexed in the background (counts, ALL and search)
-    s.movie.start().then((_) => s.series.start());
+    WidgetsBinding.instance.addObserver(this);
+    // Movies and series load in the background (counts, ALL and search)
+    s.movie.start();
+    s.series.start();
+    // New content is picked up automatically while the app is open
+    _auto = Timer.periodic(const Duration(minutes: 5), (_) => syncAll());
+  }
+
+  @override
+  void dispose() {
+    _auto?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState st) {
+    if (st == AppLifecycleState.resumed) syncAll();
+  }
+
+  void syncAll() {
+    if (!Cfg.gb('auto_content', true)) return;
+    for (final l in [s.live, s.movie, s.series]) {
+      if (l.failed) {
+        l.start(); // a category failed earlier: try the missing ones again
+      } else {
+        l.refreshBg();
+      }
+    }
   }
 
   String expiry() {
@@ -513,8 +692,11 @@ class _HomeState extends State<Home> {
   Widget sub(Lib l, String unit) => ValueListenableBuilder<int>(
         valueListenable: l.tick,
         builder: (_, __, ___) {
-          if (l.total > 0) Cfg.saveCount(l.type, l.total);
-          final n = l.total > 0 ? l.total : Cfg.counts[l.type] ?? 0;
+          // Only a finished count is saved; until then the last known total is shown
+          if (l.full && l.total > 0) Cfg.saveCount(l.type, l.total);
+          // The total is known right away (quick count) and never counts up step by step
+          final saved = Cfg.counts[l.type] ?? 0;
+          final n = l.full ? l.total : (l.quick ?? saved);
           final txt = n > 0 ? '$n $unit' : unit;
           return Text(txt, style: const TextStyle(color: Colors.white60, fontSize: 16));
         },

@@ -385,6 +385,10 @@ class Lib {
       failed = false;
       progress = 0;
       _all = null;
+      _lastSync = null;
+      _syncing = false;
+      quick = null;
+      quickF = null;
       _dropCache();
       tick.value++;
     }
@@ -418,9 +422,59 @@ class Lib {
     _all = null;
   }
 
+  // ---- Instant total: the whole list is streamed and only counted (nothing is kept in memory) ----
+  int? quick;
+  Future<void>? quickF;
+
+  Future<int?> _countAll() async {
+    final key = type == 'series' ? '"series_id"' : '"stream_id"';
+    final pat = key.codeUnits;
+    final hc = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+    try {
+      final rq = await hc.getUrl(Uri.parse(s.api(itemAction[type]!))).timeout(const Duration(seconds: 15));
+      ua.forEach((k, v) => rq.headers.set(k, v));
+      final rs = await rq.close().timeout(const Duration(seconds: 30));
+      if (rs.statusCode != 200) return null;
+      var n = 0;
+      var tail = <int>[];
+      await for (final chunk in rs.timeout(const Duration(seconds: 60))) {
+        final b = tail.isEmpty ? chunk : [...tail, ...chunk];
+        final last = b.length - pat.length;
+        for (var i = 0; i <= last; i++) {
+          if (b[i] != pat[0]) continue;
+          var j = 1;
+          while (j < pat.length && b[i + j] == pat[j]) {
+            j++;
+          }
+          if (j == pat.length) n++;
+        }
+        final keep = pat.length - 1;
+        tail = b.length > keep ? b.sublist(b.length - keep) : List<int>.of(b);
+      }
+      return n > 0 ? n : null;
+    } catch (_) {
+      return null;
+    } finally {
+      hc.close(force: true);
+    }
+  }
+
+  Future<void> quickCount() {
+    return quickF ??= () async {
+      final n = await _countAll();
+      if (n != null) {
+        quick = n;
+        Cfg.saveCount(type, n);
+        tick.value++;
+      }
+    }();
+  }
+
   Future<void> _run() async {
     final ep = _epoch;
+    failed = false;
     try {
+      if (type != 'live') quickCount();
       if (cats.isEmpty) await loadCats();
       if (type == 'live') {
         final l = await s.fetchItems(itemAction['live']!, '', type, 120);
@@ -428,6 +482,7 @@ class Lib {
         _group(l);
         full = true;
         progress = 1;
+        _lastSync = DateTime.now();
       } else {
         await _runCats(ep);
       }
@@ -438,21 +493,34 @@ class Lib {
     tick.value++;
   }
 
+  // One category, with up to 3 tries so a slow or busy server does not leave a gap in the total
+  Future<List<It>> _fetchCat(String id) async {
+    Object? last;
+    for (var a = 0; a < 3; a++) {
+      try {
+        return await s.fetchItems(itemAction[type]!, '&category_id=$id', type);
+      } catch (e) {
+        last = e;
+        await Future<void>.delayed(Duration(seconds: 1 + a * 2));
+      }
+    }
+    throw last ?? Exception('fetch failed');
+  }
+
   Future<void> _runCats(int ep) async {
     final path = await _path();
     final f = path == null ? null : File(path);
-    if (path != null &&
-        f != null &&
-        f.existsSync() &&
-        (!Cfg.gb('auto_content', true) ||
-            DateTime.now().difference(f.statSync().modified).inHours < 24)) {
+    if (path != null && f != null && f.existsSync()) {
       final l = await compute(readCache, path);
       if (ep != _epoch) return;
       if (l.isNotEmpty) {
+        // Saved library: counts and lists show at once, new content is checked in the background
         _group(l);
         full = true;
         progress = 1;
+        _lastSync = f.statSync().modified;
         tick.value++;
+        if (Cfg.gb('auto_content', true)) refreshBg();
         return;
       }
     }
@@ -462,22 +530,20 @@ class Lib {
     } catch (_) {}
     final ids = [for (final c in cats) '${c['category_id']}'];
     var done = 0, next = 0;
-    var bad = false, complete = true;
+    var bad = false;
     Future<void> wq = Future<void>.value();
     Future<void> worker() async {
       while (true) {
         final k = next++;
         if (k >= ids.length || ep != _epoch) return;
-        if (byCat.containsKey(ids[k])) {
-          complete = false;
-          done++;
-          continue;
-        }
         try {
-          final l = await s.fetchItems(itemAction[type]!, '&category_id=${ids[k]}', type);
+          final have = byCat[ids[k]];
+          final l = have ?? await _fetchCat(ids[k]);
           if (ep != _epoch) return;
-          byCat[ids[k]] = l;
-          _all = null;
+          if (have == null) {
+            byCat[ids[k]] = l;
+            _all = null;
+          }
           if (l.isNotEmpty && tmp != null) {
             final data = l.map((e) => e.line).join();
             wq = wq.then((_) => tmp.writeAsString(data, mode: FileMode.append)).catchError((_) {
@@ -494,14 +560,14 @@ class Lib {
       }
     }
 
-    await Future.wait([for (var j = 0; j < 4; j++) worker()]);
+    await Future.wait([for (var j = 0; j < 8; j++) worker()]);
     try {
       await wq;
     } catch (_) {
       bad = true;
     }
     if (ep != _epoch) return;
-    if (!bad && complete) {
+    if (!bad) {
       try {
         if (path != null && f != null && tmp != null) {
           if (f.existsSync()) f.deleteSync();
@@ -509,18 +575,140 @@ class Lib {
         }
       } catch (_) {}
       full = true;
+      _lastSync = DateTime.now();
     } else {
       try {
         if (tmp != null && tmp.existsSync()) tmp.deleteSync();
       } catch (_) {}
-      if (bad) {
-        failed = true;
-        _job = null;
-      } else {
-        full = true;
-      }
+      failed = true;
+      _job = null;
     }
     progress = 1;
+  }
+
+  // ---- Automatic update: picks up new / removed content without any button ----
+  bool _syncing = false;
+  DateTime? _lastSync;
+
+  Future<void> _saveCache() async {
+    final path = await _path();
+    if (path == null) return;
+    final tmp = File('$path.part');
+    final sink = tmp.openWrite();
+    try {
+      for (final l in byCat.values.toList()) {
+        if (l.isEmpty) continue;
+        sink.write(l.map((e) => e.line).join());
+        await Future<void>.delayed(Duration.zero);
+      }
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
+    final f = File(path);
+    if (f.existsSync()) f.deleteSync();
+    tmp.renameSync(path);
+  }
+
+  bool _same(List<It> a, List<It> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].id != b[i].id || a[i].name != b[i].name || a[i].icon != b[i].icon) return false;
+    }
+    return true;
+  }
+
+  /// Quietly re-reads the server and updates only what changed. The counts keep
+  /// showing the old total until the new data is ready, then switch by themselves.
+  Future<void> refreshBg({bool force = false}) async {
+    if (_syncing || !full) return;
+    final last = _lastSync;
+    if (!force && last != null && DateTime.now().difference(last).inMinutes < 4) return;
+    _syncing = true;
+    final ep = _epoch;
+    var changed = false;
+    try {
+      final nc = await s.list(catAction[type]!);
+      final newCats = [
+        for (final c in nc)
+          if (c is Map) c
+      ];
+      if (ep != _epoch) return;
+      if (type == 'live') {
+        final l = await s.fetchItems(itemAction['live']!, '', type, 120);
+        if (ep != _epoch || l.isEmpty) return;
+        final nm = <String, List<It>>{};
+        for (final i in l) {
+          (nm['${i.cat}'] ??= <It>[]).add(i);
+        }
+        final keys = {...byCat.keys, ...nm.keys};
+        for (final k in keys) {
+          final o = byCat[k] ?? <It>[], n = nm[k] ?? <It>[];
+          if (!_same(o, n)) {
+            changed = true;
+            if (n.isEmpty) {
+              byCat.remove(k);
+            } else {
+              byCat[k] = n;
+            }
+          }
+        }
+      } else {
+        final ids = [for (final c in newCats) '${c['category_id']}'];
+        if (ids.isEmpty) return;
+        var next = 0;
+        var bad = false;
+        Future<void> worker() async {
+          while (!bad) {
+            final k = next++;
+            if (k >= ids.length || ep != _epoch) return;
+            try {
+              final n = await _fetchCat(ids[k]);
+              if (ep != _epoch) return;
+              final o = byCat[ids[k]] ?? <It>[];
+              if (!_same(o, n)) {
+                changed = true;
+                if (n.isEmpty) {
+                  byCat.remove(ids[k]);
+                } else {
+                  byCat[ids[k]] = n;
+                }
+                _all = null;
+                tick.value++;
+              }
+            } catch (_) {
+              bad = true; // keep what we have; the next check tries again
+            }
+          }
+        }
+
+        await Future.wait([for (var j = 0; j < 4; j++) worker()]);
+        if (bad || ep != _epoch) return;
+        // categories the server no longer has
+        final keep = ids.toSet();
+        for (final k in byCat.keys.toList()) {
+          if (!keep.contains(k)) {
+            byCat.remove(k);
+            changed = true;
+          }
+        }
+      }
+      if (ep != _epoch) return;
+      cats = newCats;
+      _lastSync = DateTime.now();
+      if (changed) {
+        _all = null;
+        tick.value++;
+        if (type != 'live') await _saveCache();
+      } else if (type != 'live') {
+        final path = await _path();
+        if (path != null && File(path).existsSync()) File(path).setLastModifiedSync(DateTime.now());
+      }
+    } catch (_) {
+      // offline or server busy: try again at the next check
+    } finally {
+      _syncing = false;
+    }
   }
 
   List<It> recentAdded() {
@@ -617,6 +805,19 @@ Pi livePiOf(Session s, String id, String title) {
     default:
       return Pi(title, a, b, id);
   }
+}
+
+// Checks which of the servers answer right now (used by "Refresh DNS" on the login screen)
+Future<int> checkServers() async {
+  final r = await Future.wait([
+    for (final h in servers)
+      http
+          .get(Uri.parse('$h/player_api.php'), headers: ua)
+          .timeout(const Duration(seconds: 8))
+          .then((_) => true)
+          .catchError((_) => false)
+  ]);
+  return r.where((x) => x).length;
 }
 
 // Tries all 3 servers one by one; the first one that accepts the login is used
