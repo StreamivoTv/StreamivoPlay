@@ -2,7 +2,9 @@ import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
 import 'core.dart';
 import 'fx.dart';
+import 'main.dart' show doLogout;
 import 'player.dart';
+import 'settings.dart';
 
 class _Ep {
   final String title, thumb, plot, dur, no;
@@ -232,7 +234,30 @@ class _DetailState extends State<DetailPage> {
     if (mounted) setState(() => fav = now);
   }
 
-  String get playLabel => 'Watch Now';
+  String get playLabel {
+    if (isSeries && seasons.isNotEmpty) {
+      final k = seasons.keys.first;
+      final l = eps(k);
+      if (l.isNotEmpty) return 'Play S$k E${l.first.no}';
+    }
+    return 'Watch Now';
+  }
+
+  // 0..5 stars from the provider's rating (5-based when given, else the 10-based one halved)
+  double get stars {
+    final r5 = double.tryParse(pick(['rating_5based']));
+    if (r5 != null && r5 > 0) return r5.clamp(0, 5).toDouble();
+    final r10 = double.tryParse(pick(['rating']));
+    if (r10 != null && r10 > 0) return (r10 / 2).clamp(0, 5).toDouble();
+    return it.rating > 0 ? (it.rating / 2).clamp(0, 5).toDouble() : 0;
+  }
+
+  Widget starRow(double v, {double size = 22}) => Row(mainAxisSize: MainAxisSize.min, children: [
+        for (var k = 0; k < 5; k++)
+          Icon(v >= k + 0.75 ? Icons.star : (v >= k + 0.25 ? Icons.star_half : Icons.star_border),
+              size: size,
+              color: v >= k + 0.25 ? Colors.amber : Colors.white38),
+      ]);
 
   Widget castSection(String castNames) {
     final List<Map<String, String>> people = tmdb.isNotEmpty
@@ -451,6 +476,20 @@ class _DetailState extends State<DetailPage> {
             padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
             child: Row(children: [
               rb(Icons.arrow_back, () => Navigator.pop(c)),
+              if (isSeries) ...[
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Text(it.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 20)),
+                ),
+                rb(Icons.home, () => Navigator.of(c).popUntil((r) => r.isFirst)),
+                rb(Icons.sync, reload),
+                rb(Icons.settings, () => Navigator.push(
+                    c, MaterialPageRoute(builder: (_) => const SettingsPage()))),
+                rb(Icons.logout, () => doLogout(c)),
+              ],
             ]),
           ),
           Expanded(
@@ -473,7 +512,7 @@ class _DetailState extends State<DetailPage> {
                       const SizedBox(width: 26),
                       Expanded(
                         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          if (cat.isNotEmpty)
+                          if (!isSeries && cat.isNotEmpty)
                             Text(cat.toUpperCase(),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
@@ -482,38 +521,82 @@ class _DetailState extends State<DetailPage> {
                                     fontWeight: FontWeight.bold,
                                     letterSpacing: 2,
                                     color: Colors.white70)),
-                          const SizedBox(height: 6),
+                          if (!isSeries) const SizedBox(height: 6),
                           Text(it.name,
                               style: const TextStyle(fontSize: 30, fontWeight: FontWeight.bold)),
-                          if (meta.isNotEmpty) ...[
+                          if (isSeries) ...[
+                            // like the reference: year · genres · seasons, then the stars
                             const SizedBox(height: 10),
-                            Text(meta, style: const TextStyle(fontSize: 18, color: Colors.white70)),
-                          ],
-                          if (gl.isNotEmpty) ...[
-                            const SizedBox(height: 14),
-                            Wrap(spacing: 10, runSpacing: 8, children: [for (final g in gl) chip(g)]),
-                          ],
-                          if (castNames.isNotEmpty) ...[
-                            const SizedBox(height: 14),
-                            Text.rich(
-                              TextSpan(children: [
-                                const TextSpan(
-                                    text: 'Cast:  ',
-                                    style: TextStyle(fontWeight: FontWeight.bold)),
-                                TextSpan(text: castNames),
-                              ]),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontSize: 15),
-                            ),
-                          ],
-                          // series: the story stays above the cast; movies show it below the cast
-                          if (isSeries && plot.isNotEmpty) ...[
-                            const SizedBox(height: 12),
-                            Text(plot,
-                                maxLines: 5,
+                            Text(
+                                [
+                                  year,
+                                  gl.join(', '),
+                                  seasons.isEmpty ? '' : '${seasons.length} Seasons'
+                                ].where((e) => e.isNotEmpty).join('·'),
+                                style: const TextStyle(fontSize: 18, color: Colors.white70)),
+                            if (stars > 0) ...[
+                              const SizedBox(height: 6),
+                              starRow(stars),
+                            ],
+                            if (plot.isNotEmpty) ...[
+                              const SizedBox(height: 14),
+                              Text(plot,
+                                  maxLines: 3,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 17, height: 1.35)),
+                            ],
+                            if (pick(['director']).isNotEmpty) ...[
+                              const SizedBox(height: 12),
+                              Text.rich(
+                                TextSpan(children: [
+                                  const TextSpan(
+                                      text: 'Director: ',
+                                      style: TextStyle(fontWeight: FontWeight.bold)),
+                                  TextSpan(text: pick(['director'])),
+                                ]),
+                                maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(fontSize: 16, height: 1.35)),
+                                style: const TextStyle(fontSize: 16),
+                              ),
+                            ],
+                            if (castNames.isNotEmpty) ...[
+                              const SizedBox(height: 4),
+                              Text.rich(
+                                TextSpan(children: [
+                                  const TextSpan(
+                                      text: 'Cast: ',
+                                      style: TextStyle(fontWeight: FontWeight.bold)),
+                                  TextSpan(text: castNames),
+                                ]),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 16),
+                              ),
+                            ],
+                          ],
+                          if (!isSeries) ...[
+                            if (meta.isNotEmpty) ...[
+                              const SizedBox(height: 10),
+                              Text(meta, style: const TextStyle(fontSize: 18, color: Colors.white70)),
+                            ],
+                            if (gl.isNotEmpty) ...[
+                              const SizedBox(height: 14),
+                              Wrap(spacing: 10, runSpacing: 8, children: [for (final g in gl) chip(g)]),
+                            ],
+                            if (castNames.isNotEmpty) ...[
+                              const SizedBox(height: 14),
+                              Text.rich(
+                                TextSpan(children: [
+                                  const TextSpan(
+                                      text: 'Cast:  ',
+                                      style: TextStyle(fontWeight: FontWeight.bold)),
+                                  TextSpan(text: castNames),
+                                ]),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 15),
+                              ),
+                            ],
                           ],
                           if (error != null)
                             Padding(
@@ -526,7 +609,7 @@ class _DetailState extends State<DetailPage> {
                           const SizedBox(height: 18),
                           Wrap(spacing: 12, runSpacing: 10, children: [
                             SizedBox(
-                                width: 200,
+                                width: 230,
                                 child: GradBtn(playLabel, watchNow,
                                     icon: Icons.play_arrow, busy: isSeries && loading)),
                             SizedBox(

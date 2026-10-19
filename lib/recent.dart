@@ -188,11 +188,8 @@ class _RecentSlidesState extends State<RecentSlides> {
     }
     final f = MediaQuery.of(c).size.height / 480;
     final sw = MediaQuery.of(c).size.width;
-    const win = 20;
-    var start = cur - 9 < 0 ? 0 : cur - 9;
-    final maxStart = l.length - win;
-    if (maxStart >= 0 && start > maxStart) start = maxStart;
-    final end = (start + win) < l.length ? start + win : l.length;
+    final step = 46 * f;
+    final dx = sw * 0.52 - (cur * step + step / 2);
     return Container(
       color: Colors.black,
       child: Stack(children: [
@@ -221,24 +218,40 @@ class _RecentSlidesState extends State<RecentSlides> {
           left: 0,
           right: 0,
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Padding(
-              padding: EdgeInsets.symmetric(horizontal: sw * 0.06),
-              child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                for (var k = start; k < end; k++)
-                  SizedBox(
-                    width: 28 * f,
-                    height: 28 * f,
-                    child: Center(
-                      child: Container(
-                        width: (k == cur ? 26 : 16) * f,
-                        height: (k == cur ? 26 : 16) * f,
-                        decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: k == cur ? Colors.lightBlueAccent : Colors.white70),
-                      ),
+            ClipRect(
+              child: SizedBox(
+                height: 28 * f,
+                width: double.infinity,
+                child: TweenAnimationBuilder<double>(
+                  tween: Tween<double>(end: dx),
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeOut,
+                  builder: (_, v, __) => OverflowBox(
+                    alignment: Alignment.centerLeft,
+                    minWidth: 0,
+                    maxWidth: double.infinity,
+                    child: Transform.translate(
+                      offset: Offset(v, 0),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        for (var k = 0; k < l.length; k++)
+                          SizedBox(
+                            width: step,
+                            height: 28 * f,
+                            child: Center(
+                              child: Container(
+                                width: (k == cur ? 26 : 16) * f,
+                                height: (k == cur ? 26 : 16) * f,
+                                decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: k == cur ? Colors.lightBlueAccent : Colors.white70),
+                              ),
+                            ),
+                          ),
+                      ]),
                     ),
                   ),
-              ]),
+                ),
+              ),
             ),
             const SizedBox(height: 4),
             Text('${cur + 1} of ${l.length} Records',

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -323,6 +324,17 @@ List<It> parseItems(List a) {
   ];
 }
 
+// Runs in a background isolate (bytes straight from the network)
+List<It> parseBytes(List a) {
+  final d = jsonDecode(utf8.decode(a[0] as List<int>, allowMalformed: true));
+  final type = a[1] as String;
+  if (d is! List) return <It>[];
+  return [
+    for (final m in d)
+      if (m is Map) _mk(m, type)
+  ];
+}
+
 // Runs in a background isolate
 List<It> readCache(String path) {
   final out = <It>[];
@@ -348,6 +360,7 @@ class Lib {
   List<Map> cats = [];
   final Map<String, List<It>> byCat = {};
   bool full = false, failed = false;
+  String err = ''; // short reason of the last failure (shown on the dashboard)
   double progress = 0;
   final ValueNotifier<int> tick = ValueNotifier<int>(0);
   Future<void>? _job;
@@ -469,8 +482,8 @@ class Lib {
     final ep = _epoch;
     failed = false;
     try {
-      if (cats.isEmpty) await loadCats();
       if (type == 'live') {
+        if (cats.isEmpty) await loadCats();
         final l = await s.fetchItems(itemAction['live']!, '', type, 120);
         if (ep != _epoch) return;
         _group(l);
@@ -502,6 +515,8 @@ class Lib {
   }
 
   Future<void> _runCats(int ep) async {
+    // categories load at the same time as the lists (not before them)
+    final catsF = cats.isEmpty ? loadCats().catchError((_) {}) : Future<void>.value();
     final path = await _path();
     final f = path == null ? null : File(path);
     if (path != null && f != null && f.existsSync()) {
@@ -510,6 +525,7 @@ class Lib {
       if (l.isNotEmpty) {
         // Saved library: counts and lists show at once, new content is checked in the background
         _group(l);
+        await catsF;
         full = true;
         progress = 1;
         _lastSync = f.statSync().modified;
@@ -521,10 +537,21 @@ class Lib {
     // Fast path: the whole library in ONE request (same as Live TV). Much quicker than
     // one request per category; falls back to the per-category way if the server refuses.
     try {
-      final all = await s.fetchItems(itemAction[type]!, '', type, 45);
+      var lastT = DateTime.fromMillisecondsSinceEpoch(0);
+      final all = await s.fetchStream(itemAction[type]!, '', type, (n, tot) {
+        // real percent when the server tells the size, otherwise a smooth estimate
+        final p = tot > 0 ? n / tot : n / (n + 6000000.0);
+        progress = p > 0.95 ? 0.95 : p;
+        final now = DateTime.now();
+        if (now.difference(lastT).inMilliseconds > 300) {
+          lastT = now;
+          tick.value++;
+        }
+      });
       if (ep != _epoch) return;
       if (all.isNotEmpty) {
         _group(all);
+        await catsF;
         full = true;
         progress = 1;
         _lastSync = DateTime.now();
@@ -534,8 +561,13 @@ class Lib {
         } catch (_) {}
         return;
       }
-    } catch (_) {}
+    } catch (e) {
+      err = '$e'.replaceAll(RegExp(r'\s+'), ' ');
+      if (err.length > 48) err = err.substring(0, 48);
+    }
     if (ep != _epoch) return;
+    await catsF;
+    if (cats.isEmpty) await loadCats();
     final tmp = path == null ? null : File('$path.part');
     try {
       if (tmp != null && tmp.existsSync()) tmp.deleteSync();
@@ -581,7 +613,7 @@ class Lib {
       }
     }
 
-    await Future.wait([for (var j = 0; j < 12; j++) worker()]);
+    await Future.wait([for (var j = 0; j < 4; j++) worker()]);
     try {
       await wq;
     } catch (_) {
@@ -807,6 +839,29 @@ class Session {
     return compute(parseItems, <dynamic>[r.body, type]);
   }
 
+  // Whole list in one request, read as a stream: the timeout is for silence (no data for
+  // 30 s), not for the total time, and onProgress reports the bytes received so far.
+  Future<List<It>> fetchStream(String action, String extra, String type,
+      void Function(int bytes, int total) onProgress) async {
+    final cl = http.Client();
+    try {
+      final rq = http.Request('GET', Uri.parse(api(action, extra)));
+      rq.headers.addAll(ua);
+      final rs = await cl.send(rq).timeout(const Duration(seconds: 30));
+      if (rs.statusCode != 200) throw Exception('http ${rs.statusCode}');
+      final buf = BytesBuilder(copy: false);
+      var n = 0;
+      await for (final ch in rs.stream.timeout(const Duration(seconds: 30))) {
+        buf.add(ch);
+        n += ch.length;
+        onProgress(n, rs.contentLength ?? 0);
+      }
+      return await compute(parseBytes, <dynamic>[buf.takeBytes(), type]);
+    } finally {
+      cl.close();
+    }
+  }
+
   // Returns [now, next] programme titles
   Future<List<String>> epg(String id) async {
     try {
@@ -867,24 +922,30 @@ Future<int> checkServers() async {
 Future<Session?> tryLogin(String user, String pass) async {
   final u = Uri.encodeComponent(user), p = Uri.encodeComponent(pass);
   var answered = false, rejected = false;
-  for (final h in servers) {
+  final win = Completer<Session?>();
+  var left = servers.length;
+
+  Future<void> one(String h) async {
     try {
       final r = await http
           .get(Uri.parse('$h/player_api.php?username=$u&password=$p'), headers: ua)
-          .timeout(const Duration(seconds: 15));
+          .timeout(const Duration(seconds: 10));
       answered = true;
       if (r.statusCode == 401 || r.statusCode == 403) {
         rejected = true;
-        continue;
-      }
-      final body = r.body.replaceFirst('\uFEFF', '').trim();
-      final d = jsonDecode(body);
-      if (d is Map && d['user_info'] is Map) {
-        if ('${d['user_info']['auth']}' == '1') {
-          loginDiag = '';
-          return Session(h, user, pass, d['user_info']);
+      } else {
+        final body = r.body.replaceFirst('\uFEFF', '').trim();
+        final d = jsonDecode(body);
+        if (d is Map && d['user_info'] is Map) {
+          if ('${d['user_info']['auth']}' == '1') {
+            if (!win.isCompleted) {
+              loginDiag = '';
+              win.complete(Session(h, user, pass, d['user_info']));
+            }
+          } else {
+            rejected = true;
+          }
         }
-        rejected = true;
       }
     } on TimeoutException {
       // no answer from this server
@@ -893,7 +954,14 @@ Future<Session?> tryLogin(String user, String pass) async {
     } catch (_) {
       // no connection to this server
     }
+    if (--left == 0 && !win.isCompleted) win.complete(null);
   }
+
+  for (final h in servers) {
+    one(h);
+  }
+  final res = await win.future;
+  if (res != null) return res;
   loginDiag = rejected
       ? 'Username or Password Failed'
       : (answered ? 'Server Error. Try again later.' : 'No Internet Connection');

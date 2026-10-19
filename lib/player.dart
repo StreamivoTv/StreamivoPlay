@@ -213,7 +213,7 @@ class _PlayerState extends State<Player> {
       double? inst;
       if (!widget.live && resolvedSize > 0 && dur > 0) {
         inst = (grownMs > 0 ? grownMs : 0) * (resolvedSize / dur) / secs / 1024.0;
-      } else if (widget.live || dur <= 0) {
+      } else {
         // live: no file size, so estimate from how many seconds of video arrived
         // and a typical bitrate for the picture height
         final hh = v.value.size.height;
@@ -229,7 +229,7 @@ class _PlayerState extends State<Player> {
   }
 
   String get speedText {
-    if (kbps < 0) return '-- KB/s';
+    if (kbps <= 0) return '0.0 KB/s';
     return kbps >= 1024
         ? '${(kbps / 1024).toStringAsFixed(2)} MB/s'
         : '${kbps.toStringAsFixed(1)} KB/s';
@@ -697,7 +697,8 @@ class _PlayerState extends State<Player> {
   }
 
   // ---- UI ----
-  // 0 -> 100 while loading; it never goes backwards during one load, and stays at 100 when full
+  // Starts at 0%. It only grows when data really arrives (seconds of video buffered ahead of the
+  // playhead), so it follows the connection speed. It never goes backwards during one load.
   int bufPct(VideoPlayerController? v) {
     final busyNow = loading || (v != null && v.value.isBuffering);
     if (busyNow && !wasBusy) {
@@ -705,20 +706,15 @@ class _PlayerState extends State<Player> {
       loadStart = DateTime.now();
     }
     wasBusy = busyNow;
-    int p;
-    if (v == null || !v.value.isInitialized) {
-      // connecting: ease up to 60% with time so it visibly moves
-      final t = DateTime.now().difference(loadStart).inMilliseconds / 1000.0;
-      p = (60 * (1 - 1 / (1 + t / 3))).round();
-    } else {
+    var p = 0;
+    if (v != null && v.value.isInitialized) {
       final b = v.value.buffered;
       final ahead = b.isEmpty ? Duration.zero : b.last.end - v.value.position;
-      // 3 seconds of video ahead of the playhead = 100%
-      final real = (ahead.inMilliseconds / 30).clamp(0, 100).round();
-      p = real < 60 ? 60 + (real * 0.6).round() : real;
+      final target = widget.live ? 6000 : 10000; // ms of video that counts as 100%
+      p = (ahead.inMilliseconds * 100 / target).clamp(0, 100).round();
+      if (kbps <= 0 && p > pctHold) p = pctHold; // no data coming in -> no progress
     }
     if (p > pctHold) pctHold = p;
-    if (pctHold > 100) pctHold = 100;
     return pctHold;
   }
 

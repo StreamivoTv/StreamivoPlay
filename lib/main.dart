@@ -316,12 +316,8 @@ class _SetupState extends State<Setup> {
       final Session sess = s;
       done(0);
       go(1, 10, 'Reading account...');
-      try {
-        await sess.infoOf('', '');
-      } catch (_) {}
       done(1);
       go(2, 25, 'Loading categories...');
-      await Future.wait([sess.live.loadCats(), sess.movie.loadCats(), sess.series.loadCats()]);
       done(2);
       go(3, 30, 'Loading data...');
       // Live, movies and series are loaded in parallel, each with one request. A returning
@@ -330,12 +326,12 @@ class _SetupState extends State<Setup> {
       var fin = false;
       Future.wait(jobs).whenComplete(() => fin = true);
       // Returning users already have saved totals + saved library, so they go straight in.
-      // A new user waits here until live, movies and series are all counted (max 90 s),
-      // so the dashboard shows every number at once and nothing keeps loading behind it.
+      // A new user waits here until live, movies and series are all counted (max 10 s),
+      // so the dashboard normally shows every number at once.
       final saved = Cfg.counts['live'] != null &&
           Cfg.counts['movie'] != null &&
           Cfg.counts['series'] != null;
-      final maxMs = saved ? 0 : 90000;
+      final maxMs = saved ? 0 : 10000; // new user: at most 10 s, then the dashboard opens and counts fill in
       final wait = Stopwatch()..start();
       while (!fin && mounted && wait.elapsedMilliseconds < maxMs) {
         await Future<void>.delayed(const Duration(milliseconds: 100));
@@ -749,7 +745,7 @@ class Home extends StatefulWidget {
 
 class _HomeState extends State<Home> with WidgetsBindingObserver {
   Session get s => widget.s;
-  Timer? _auto;
+  Timer? _auto, _retry;
 
   @override
   void initState() {
@@ -760,11 +756,18 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     s.series.start();
     // New content is picked up automatically while the app is open
     _auto = Timer.periodic(const Duration(minutes: 5), (_) => syncAll());
+    // a list that failed or is still empty is retried every few seconds until it arrives
+    _retry = Timer.periodic(const Duration(seconds: 6), (_) {
+      for (final l in [s.live, s.movie, s.series]) {
+        if (l.failed || (!l.full && l.total == 0)) l.start();
+      }
+    });
   }
 
   @override
   void dispose() {
     _auto?.cancel();
+    _retry?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -804,8 +807,11 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           // Everything is loaded on the setup screen, so the dashboard shows the final total at once
           final saved = Cfg.counts[l.type] ?? 0;
           final n = l.full ? l.total : (l.total > saved ? l.total : saved);
-          final txt = n > 0 ? '$n $unit' : unit;
-          return Text(txt, style: const TextStyle(color: Colors.white60, fontSize: 16));
+          final txt = n > 0 ? '$n $unit' : (l.failed ? (l.err.isEmpty ? '$unit - tap refresh' : 'Failed: ${l.err}') : 'Loading...');
+          return Text(txt,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white60, fontSize: 16));
         },
       );
 
