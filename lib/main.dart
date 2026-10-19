@@ -324,22 +324,30 @@ class _SetupState extends State<Setup> {
       await Future.wait([sess.live.loadCats(), sess.movie.loadCats(), sess.series.loadCats()]);
       done(2);
       go(3, 30, 'Loading data...');
-      // Live, movies and series are read in ONE parallel pass (12 requests at a time). A returning
-      // user has saved totals and the saved library, so nothing is waited for; a new user waits
-      // at most 5 seconds. Whatever is not finished then keeps loading quietly in the background.
-      final jobs = <Future<void>>[sess.live.start(), sess.movie.start(), sess.series.start()];
+      // Live, movies and series are loaded in parallel, each with one request. A returning
+      final libs = [sess.live, sess.movie, sess.series];
+      final jobs = <Future<void>>[for (final l in libs) l.start()];
       var fin = false;
       Future.wait(jobs).whenComplete(() => fin = true);
-      final quickWait = (Cfg.counts['live'] != null &&
-              Cfg.counts['movie'] != null &&
-              Cfg.counts['series'] != null)
-          ? 0
-          : 5;
+      // Returning users already have saved totals + saved library, so they go straight in.
+      // A new user waits here until live, movies and series are all counted (max 90 s),
+      // so the dashboard shows every number at once and nothing keeps loading behind it.
+      final saved = Cfg.counts['live'] != null &&
+          Cfg.counts['movie'] != null &&
+          Cfg.counts['series'] != null;
+      final maxMs = saved ? 0 : 90000;
       final wait = Stopwatch()..start();
-      while (!fin && mounted && wait.elapsedMilliseconds < quickWait * 1000) {
+      while (!fin && mounted && wait.elapsedMilliseconds < maxMs) {
         await Future<void>.delayed(const Duration(milliseconds: 100));
-        final f = wait.elapsedMilliseconds / (quickWait * 1000);
-        go(3, 30 + 60 * (f > 1.0 ? 1.0 : f), 'Loading data...');
+        final t = wait.elapsedMilliseconds / 1000.0;
+        final ease = 1 - 1 / (1 + t / 6); // keeps moving, never jumps back
+        var real = 0.0;
+        for (final l in libs) {
+          real += l.full ? 1.0 : l.progress;
+        }
+        real /= libs.length;
+        final f = real > ease ? real : ease;
+        go(3, 30 + 60 * (f > 0.98 ? 0.98 : f), 'Loading data...');
       }
       done(3);
       go(4, 95, 'Almost ready...');

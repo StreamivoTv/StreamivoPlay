@@ -98,6 +98,9 @@ class _PlayerState extends State<Player> {
 
   // loading box (id, speed, percent)
   double kbps = -1;
+  int pctHold = 0; // shown percent only goes up while one load/buffer is running
+  DateTime loadStart = DateTime.now();
+  bool wasBusy = false;
   Duration lastBuf = Duration.zero;
   DateTime lastAt = DateTime.now();
 
@@ -107,7 +110,7 @@ class _PlayerState extends State<Player> {
   void initState() {
     super.initState();
     idx = widget.index;
-    sizeMode = Cfg.fit == 'fill' ? 3 : (Cfg.fit == 'cover' ? 2 : 0);
+    sizeMode = 3; // always open in Fill Parent (user can still change it from the player)
     subSel = Cfg.gb(widget.live ? 'sub_live' : 'sub_vod', true) ? 'auto' : 'off';
     uiBusy++; // background indexing waits while the player is open
     _activePlayers++;
@@ -204,14 +207,21 @@ class _PlayerState extends State<Player> {
     }
     final end = v.value.buffered.last.end;
     final dur = v.value.duration.inMilliseconds;
-    if (!widget.live && resolvedSize > 0 && dur > 0) {
-      final grownMs = (end - lastBuf).inMilliseconds;
-      final secs = now.difference(lastAt).inMilliseconds / 1000.0;
-      if (secs > 0) {
-        final bytes = (grownMs > 0 ? grownMs : 0) * (resolvedSize / dur);
-        final inst = bytes / secs / 1024.0;
-        kbps = kbps < 0 ? inst : (kbps * 0.5 + inst * 0.5);
+    final secs = now.difference(lastAt).inMilliseconds / 1000.0;
+    final grownMs = (end - lastBuf).inMilliseconds;
+    if (secs > 0) {
+      double? inst;
+      if (!widget.live && resolvedSize > 0 && dur > 0) {
+        inst = (grownMs > 0 ? grownMs : 0) * (resolvedSize / dur) / secs / 1024.0;
+      } else if (widget.live || dur <= 0) {
+        // live: no file size, so estimate from how many seconds of video arrived
+        // and a typical bitrate for the picture height
+        final hh = v.value.size.height;
+        final rate = hh >= 1000 ? 650.0 : (hh >= 700 ? 420.0 : (hh >= 500 ? 220.0 : 120.0)); // KB per video second
+        final got = (grownMs > 0 ? grownMs : 0) / 1000.0;
+        inst = got * rate / secs;
       }
+      if (inst != null) kbps = kbps < 0 ? inst : (kbps * 0.5 + inst * 0.5);
     }
     lastBuf = end;
     lastAt = now;
@@ -221,8 +231,8 @@ class _PlayerState extends State<Player> {
   String get speedText {
     if (kbps < 0) return '-- KB/s';
     return kbps >= 1024
-        ? '${(kbps / 1024).toStringAsFixed(1)}MB/s'
-        : '${kbps.toStringAsFixed(1)}KB/s';
+        ? '${(kbps / 1024).toStringAsFixed(2)} MB/s'
+        : '${kbps.toStringAsFixed(1)} KB/s';
   }
 
   String lastErr = '';
@@ -256,6 +266,8 @@ class _PlayerState extends State<Player> {
       loading = true;
       err = null;
       kbps = -1;
+      pctHold = 0;
+      loadStart = DateTime.now();
       lastBuf = Duration.zero;
     });
     await disposeLater(old);
@@ -685,12 +697,29 @@ class _PlayerState extends State<Player> {
   }
 
   // ---- UI ----
+  // 0 -> 100 while loading; it never goes backwards during one load, and stays at 100 when full
   int bufPct(VideoPlayerController? v) {
-    if (v == null || !v.value.isInitialized) return 0;
-    final b = v.value.buffered;
-    if (b.isEmpty) return 0;
-    final ahead = b.last.end - v.value.position;
-    return (ahead.inMilliseconds / 100).clamp(0, 100).round();
+    final busyNow = loading || (v != null && v.value.isBuffering);
+    if (busyNow && !wasBusy) {
+      pctHold = 0;
+      loadStart = DateTime.now();
+    }
+    wasBusy = busyNow;
+    int p;
+    if (v == null || !v.value.isInitialized) {
+      // connecting: ease up to 60% with time so it visibly moves
+      final t = DateTime.now().difference(loadStart).inMilliseconds / 1000.0;
+      p = (60 * (1 - 1 / (1 + t / 3))).round();
+    } else {
+      final b = v.value.buffered;
+      final ahead = b.isEmpty ? Duration.zero : b.last.end - v.value.position;
+      // 3 seconds of video ahead of the playhead = 100%
+      final real = (ahead.inMilliseconds / 30).clamp(0, 100).round();
+      p = real < 60 ? 60 + (real * 0.6).round() : real;
+    }
+    if (p > pctHold) pctHold = p;
+    if (pctHold > 100) pctHold = 100;
+    return pctHold;
   }
 
   String get idLabel {

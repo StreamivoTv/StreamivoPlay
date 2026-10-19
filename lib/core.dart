@@ -518,6 +518,24 @@ class Lib {
         return;
       }
     }
+    // Fast path: the whole library in ONE request (same as Live TV). Much quicker than
+    // one request per category; falls back to the per-category way if the server refuses.
+    try {
+      final all = await s.fetchItems(itemAction[type]!, '', type, 45);
+      if (ep != _epoch) return;
+      if (all.isNotEmpty) {
+        _group(all);
+        full = true;
+        progress = 1;
+        _lastSync = DateTime.now();
+        tick.value++;
+        try {
+          await _saveCache();
+        } catch (_) {}
+        return;
+      }
+    } catch (_) {}
+    if (ep != _epoch) return;
     final tmp = path == null ? null : File('$path.part');
     try {
       if (tmp != null && tmp.existsSync()) tmp.deleteSync();
