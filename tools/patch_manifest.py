@@ -30,7 +30,7 @@ s = re.sub(
     s,
     count=1,
 )
-s = re.sub(r'android:label="[^"]*"', 'android:label="Streamivo"', s)
+s = re.sub(r'android:label="[^"]*"', 'android:label="STREAMIVOTV"', s)
 
 s = s.replace(
     '</application>',

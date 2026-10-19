@@ -337,11 +337,11 @@ class _BrowseState extends State<Browse> {
   }
 
   Widget topBar() => SizedBox(
-        height: 56,
+        height: 64,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Row(children: [
-            logoImg(36),
+            logoImg(56),
             Expanded(
               child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                 tab('Live', 'live'),
@@ -463,7 +463,10 @@ class _BrowseState extends State<Browse> {
           return Column(children: [
             field(csc, 'Search here...', (v) => setState(() => catQ = v.trim())),
             Expanded(
-              child: ListView.builder(
+              child: Material(
+                color: Colors.transparent,
+                clipBehavior: Clip.hardEdge,
+                child: ListView.builder(
                 itemCount: rows.length,
                 itemBuilder: (_, k) {
                   final r = rows[k];
@@ -487,7 +490,7 @@ class _BrowseState extends State<Browse> {
                     onTap: () => select(id),
                   );
                 },
-              ),
+              )),
             ),
           ]);
         },
@@ -496,7 +499,10 @@ class _BrowseState extends State<Browse> {
   Widget livePane() => Column(children: [
         if (showSearch) field(sc, 'Search here...', onQuery, auto: true),
         Expanded(
-          child: body(() => ListView.builder(
+          child: body(() => Material(
+                color: Colors.transparent,
+                clipBehavior: Clip.hardEdge,
+                child: ListView.builder(
                 itemCount: shown.length,
                 itemBuilder: (_, n) {
                   final i = shown[n];
@@ -517,7 +523,7 @@ class _BrowseState extends State<Browse> {
                     onTap: () => onTapItem(i),
                   );
                 },
-              )),
+              ))),
         ),
       ]);
 

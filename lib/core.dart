@@ -387,8 +387,6 @@ class Lib {
       _all = null;
       _lastSync = null;
       _syncing = false;
-      quick = null;
-      quickF = null;
       _dropCache();
       tick.value++;
     }
@@ -422,59 +420,10 @@ class Lib {
     _all = null;
   }
 
-  // ---- Instant total: the whole list is streamed and only counted (nothing is kept in memory) ----
-  int? quick;
-  Future<void>? quickF;
-
-  Future<int?> _countAll() async {
-    final key = type == 'series' ? '"series_id"' : '"stream_id"';
-    final pat = key.codeUnits;
-    final hc = HttpClient()..connectionTimeout = const Duration(seconds: 10);
-    try {
-      final rq = await hc.getUrl(Uri.parse(s.api(itemAction[type]!))).timeout(const Duration(seconds: 15));
-      ua.forEach((k, v) => rq.headers.set(k, v));
-      final rs = await rq.close().timeout(const Duration(seconds: 30));
-      if (rs.statusCode != 200) return null;
-      var n = 0;
-      var tail = <int>[];
-      await for (final chunk in rs.timeout(const Duration(seconds: 60))) {
-        final b = tail.isEmpty ? chunk : [...tail, ...chunk];
-        final last = b.length - pat.length;
-        for (var i = 0; i <= last; i++) {
-          if (b[i] != pat[0]) continue;
-          var j = 1;
-          while (j < pat.length && b[i + j] == pat[j]) {
-            j++;
-          }
-          if (j == pat.length) n++;
-        }
-        final keep = pat.length - 1;
-        tail = b.length > keep ? b.sublist(b.length - keep) : List<int>.of(b);
-      }
-      return n > 0 ? n : null;
-    } catch (_) {
-      return null;
-    } finally {
-      hc.close(force: true);
-    }
-  }
-
-  Future<void> quickCount() {
-    return quickF ??= () async {
-      final n = await _countAll();
-      if (n != null) {
-        quick = n;
-        Cfg.saveCount(type, n);
-        tick.value++;
-      }
-    }();
-  }
-
   Future<void> _run() async {
     final ep = _epoch;
     failed = false;
     try {
-      if (type != 'live') quickCount();
       if (cats.isEmpty) await loadCats();
       if (type == 'live') {
         final l = await s.fetchItems(itemAction['live']!, '', type, 120);

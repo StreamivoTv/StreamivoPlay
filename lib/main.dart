@@ -109,7 +109,7 @@ class StreamivoApp extends StatelessWidget {
   const StreamivoApp({super.key});
   @override
   Widget build(BuildContext c) => MaterialApp(
-        title: 'Streamivo',
+        title: 'STREAMIVOTV',
         debugShowCheckedModeBanner: false,
         builder: (ctx, child) => ValueListenableBuilder<int>(
           valueListenable: uiTick,
@@ -256,20 +256,21 @@ class _SetupState extends State<Setup> {
       go(2, 25, 'Loading categories...');
       await Future.wait([sess.live.loadCats(), sess.movie.loadCats(), sess.series.loadCats()]);
       done(2);
-      go(3, 60, 'Counting content...');
-      // Totals first (live list + a quick count of movies and series), THEN the
-      // background indexing starts, so nothing counts up on the dashboard.
-      final live = sess.live.start();
-      final jobs = <Future<void>>[
-        if (Cfg.counts['live'] == null) live,
-        if (Cfg.counts['movie'] == null) sess.movie.quickCount(),
-        if (Cfg.counts['series'] == null) sess.series.quickCount(),
-      ];
-      try {
-        await Future.wait(jobs).timeout(const Duration(seconds: 10));
-      } catch (_) {}
-      sess.movie.start();
-      sess.series.start();
+      go(3, 25, 'Loading content...');
+      // Live, movies and series load together while the setup screen shows the progress;
+      // the dashboard then opens with the final totals (nothing keeps counting afterwards).
+      final libs = [sess.live, sess.movie, sess.series];
+      var fin = false;
+      Future.wait([for (final l in libs) l.start()]).whenComplete(() => fin = true);
+      final wait = Stopwatch()..start();
+      while (!fin && mounted && wait.elapsed.inSeconds < 240) {
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        var sum = 0.0;
+        for (final l in libs) {
+          sum += l.full ? 1 : l.progress;
+        }
+        go(3, 25 + 70 * sum / libs.length, 'Loading content...');
+      }
       done(3);
       go(4, 95, 'Almost ready...');
       done(4);
@@ -694,9 +695,9 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
         builder: (_, __, ___) {
           // Only a finished count is saved; until then the last known total is shown
           if (l.full && l.total > 0) Cfg.saveCount(l.type, l.total);
-          // The total is known right away (quick count) and never counts up step by step
+          // Everything is loaded on the setup screen, so the dashboard shows the final total at once
           final saved = Cfg.counts[l.type] ?? 0;
-          final n = l.full ? l.total : (l.quick ?? saved);
+          final n = l.full ? l.total : (l.total > saved ? l.total : saved);
           final txt = n > 0 ? '$n $unit' : unit;
           return Text(txt, style: const TextStyle(color: Colors.white60, fontSize: 16));
         },
@@ -829,7 +830,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
           child: Column(children: [
             Row(children: [
-              logoImg(48),
+              logoImg(72),
               const Spacer(),
               rb(Icons.person, () => Navigator.push(
                   c, MaterialPageRoute(builder: (_) => AccountPage(s)))),

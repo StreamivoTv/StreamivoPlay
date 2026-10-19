@@ -205,7 +205,7 @@ class _AccountState extends State<AccountPage> {
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
             child: Row(children: [
-              logoImg(44),
+              logoImg(58),
               const Expanded(
                 child: Center(
                   child: Text('ACCOUNT INFO',
