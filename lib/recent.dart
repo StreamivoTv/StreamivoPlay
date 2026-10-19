@@ -37,14 +37,22 @@ class _RecentSlidesState extends State<RecentSlides> {
     super.dispose();
   }
 
-  // The list is built once, when the library has finished loading
+  bool _final = false;
+  DateTime _last = DateTime.fromMillisecondsSinceEpoch(0);
+
+  // Shows the newest titles as soon as the first categories arrive (no waiting for the whole
+  // library), refreshes the list while loading continues, and is final once everything is loaded
   void check() {
-    if (items != null || !lib.full || lib.total == 0) return;
+    if (!mounted || _final || lib.total == 0) return;
+    final now = DateTime.now();
+    if (!lib.full && items != null && now.difference(_last).inMilliseconds < 1500) return;
+    _last = now;
     final l = lib.recentAdded();
-    if (!mounted) return;
+    if (l.isEmpty) return;
+    if (lib.full) _final = true;
     setState(() => items = l);
-    fetch(0);
-    fetch(1);
+    fetch(cur);
+    fetch(cur + 1);
   }
 
   Future<void> loadFavs() async {
@@ -108,7 +116,7 @@ class _RecentSlidesState extends State<RecentSlides> {
                 colors: [Color(0xE6000000), Color(0x99000000), Color(0x40000000)])),
       ),
       Padding(
-        padding: EdgeInsets.fromLTRB(w * 0.085, 100 * f, w * 0.075, 20 * f),
+        padding: EdgeInsets.fromLTRB(w * 0.085, 100 * f, w * 0.075, 125 * f),
         child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Column(mainAxisSize: MainAxisSize.min, children: [
             ClipRRect(
@@ -179,8 +187,12 @@ class _RecentSlidesState extends State<RecentSlides> {
       );
     }
     final f = MediaQuery.of(c).size.height / 480;
-    final start = (cur ~/ 11) * 11;
-    final end = (start + 11) < l.length ? start + 11 : l.length;
+    final sw = MediaQuery.of(c).size.width;
+    const win = 20;
+    var start = cur - 9 < 0 ? 0 : cur - 9;
+    final maxStart = l.length - win;
+    if (maxStart >= 0 && start > maxStart) start = maxStart;
+    final end = (start + win) < l.length ? start + win : l.length;
     return Container(
       color: Colors.black,
       child: Stack(children: [
@@ -209,17 +221,25 @@ class _RecentSlidesState extends State<RecentSlides> {
           left: 0,
           right: 0,
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              for (var k = start; k < end; k++)
-                Container(
-                  margin: EdgeInsets.symmetric(horizontal: 8 * f),
-                  width: (k == cur ? 17 : 12) * f,
-                  height: (k == cur ? 17 : 12) * f,
-                  decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: k == cur ? Colors.lightBlueAccent : Colors.white70),
-                ),
-            ]),
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: sw * 0.06),
+              child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                for (var k = start; k < end; k++)
+                  SizedBox(
+                    width: 28 * f,
+                    height: 28 * f,
+                    child: Center(
+                      child: Container(
+                        width: (k == cur ? 26 : 16) * f,
+                        height: (k == cur ? 26 : 16) * f,
+                        decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: k == cur ? Colors.lightBlueAccent : Colors.white70),
+                      ),
+                    ),
+                  ),
+              ]),
+            ),
             const SizedBox(height: 4),
             Text('${cur + 1} of ${l.length} Records',
                 style: TextStyle(fontSize: 18 * f, fontWeight: FontWeight.w500)),

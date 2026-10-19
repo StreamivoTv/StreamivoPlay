@@ -1,9 +1,30 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:fvp/fvp.dart' as fvp;
 import 'package:video_player/video_player.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'core.dart';
+
+// ---- decoder choice (applied through the fvp engine before a video is opened) ----
+String _appliedDec = 'auto';
+int _activePlayers = 0;
+
+List<String> _decList(String m) => m == 'hw'
+    ? ['AMediaCodec']
+    : (m == 'sw' ? ['FFmpeg', 'dav1d'] : ['AMediaCodec', 'FFmpeg', 'dav1d']);
+
+void _applyDecoder(String m) {
+  if (m == _appliedDec) return;
+  try {
+    fvp.registerWith(options: {
+      'platforms': ['android'],
+      'video.decoders': _decList(m),
+      'audio.decoders': ['FFmpeg'],
+    });
+    _appliedDec = m;
+  } catch (_) {}
+}
 
 // Opens the built-in player, or an external app when selected in Settings.
 // Returns true when the built-in player was used.
@@ -24,7 +45,9 @@ Future<bool> playItems(BuildContext c, Session s, List<Pi> list, int idx, bool l
   }
   if (!c.mounted) return false;
   await Navigator.push(
-      c, MaterialPageRoute(builder: (_) => Player(s, list, idx, live, onIndex: onIndex, initial: initial)));
+      c,
+      MaterialPageRoute(
+          builder: (_) => Player(s, list, idx, live, onIndex: onIndex, initial: initial, kind: kd)));
   return true;
 }
 
@@ -33,10 +56,11 @@ class Player extends StatefulWidget {
   final List<Pi> items;
   final int index;
   final bool live;
+  final String kind;
   final ValueChanged<int>? onIndex;
   final VideoPlayerController? initial;
   const Player(this.s, this.items, this.index, this.live,
-      {this.onIndex, this.initial, super.key});
+      {this.onIndex, this.initial, this.kind = '', super.key});
   @override
   State<Player> createState() => _PlayerState();
 }
@@ -45,11 +69,14 @@ class _PlayerState extends State<Player> {
   VideoPlayerController? vc;
   late int idx;
   String? err;
-  bool show = true, loading = true, muted = false;
-  Timer? hideT, osdT;
+  bool show = true, loading = true, muted = false, scrub = false;
+  double scrubVal = 0;
+  Timer? hideT, osdT, pillT, speedT;
   int gen = 0, rep = 0;
-  late BoxFit fit;
-  String? osd;
+  int sizeMode = 0; // 0 Fit | 1 Fixed Width | 2 Fixed Height | 3 Fill Parent
+  static const sizeNames = ['Fit', 'Fixed Width', 'Fixed Height', 'Fill Parent'];
+  static const sizeFits = [BoxFit.contain, BoxFit.fitWidth, BoxFit.fitHeight, BoxFit.fill];
+  String? osd, pill;
   IconData osdIcon = Icons.info;
   double volume = 0.5, bright = 0.5, accum = 0, speed = 1.0;
   int dragMode = 0; // 1 = volume (left side), 2 = brightness (right side)
@@ -58,9 +85,21 @@ class _PlayerState extends State<Player> {
   Duration hBase = Duration.zero;
   int hSec = 0;
   List<String> epg = [];
-  String? menu; // null | main | speed | audio | fit
-  List audioTracks = [];
-  String audioSel = '';
+  String? menu; // null | main | speed | audio | sub | repeat | dec
+
+  // tracks / subtitles / repeat / decoder
+  List<Map<String, String>> audioTracks = [], subTracks = [];
+  String audioSel = '', audioLabel = '';
+  String subSel = 'auto', subLabel = '';
+  String repMode = 'off'; // off | one | ab
+  Duration? abA, abB, resumeAt;
+  String? decOverride;
+  bool decRetried = false;
+
+  // loading box (id, speed, percent)
+  double kbps = -1;
+  Duration lastBuf = Duration.zero;
+  DateTime lastAt = DateTime.now();
 
   Pi get cur => widget.items[idx];
 
@@ -68,7 +107,10 @@ class _PlayerState extends State<Player> {
   void initState() {
     super.initState();
     idx = widget.index;
-    fit = fitOf(Cfg.fit);
+    sizeMode = Cfg.fit == 'fill' ? 3 : (Cfg.fit == 'cover' ? 2 : 0);
+    subSel = Cfg.gb(widget.live ? 'sub_live' : 'sub_vod', true) ? 'auto' : 'off';
+    uiBusy++; // background indexing waits while the player is open
+    _activePlayers++;
     inPip.addListener(onPip);
     WakelockPlus.enable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
@@ -78,15 +120,14 @@ class _PlayerState extends State<Player> {
     nat('getBrightness').then((v) {
       if (v is double) bright = v;
     });
+    speedT = Timer.periodic(const Duration(seconds: 1), (_) => sampleSpeed());
     loadEpg();
     final pre = widget.initial;
     if (pre != null && pre.value.isInitialized) {
       // Continue the stream that is already playing (no reload)
       vc = pre;
       loading = false;
-      pre.addListener(() {
-        if (mounted) setState(() {});
-      });
+      pre.addListener(onVc);
       if (!pre.value.isPlaying) pre.play();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) poke();
@@ -99,13 +140,23 @@ class _PlayerState extends State<Player> {
   @override
   void dispose() {
     gen++;
+    uiBusy--;
+    _activePlayers--;
     inPip.removeListener(onPip);
     hideT?.cancel();
     osdT?.cancel();
+    pillT?.cancel();
+    speedT?.cancel();
     vc?.dispose();
     WakelockPlus.disable();
     nat('resetBrightness');
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    if (_appliedDec != 'auto') {
+      // give the old video time to close, then put the engine back to its normal setting
+      Future<void>.delayed(const Duration(milliseconds: 1500), () {
+        if (_activePlayers == 0) _applyDecoder('auto');
+      });
+    }
     super.dispose();
   }
 
@@ -113,11 +164,25 @@ class _PlayerState extends State<Player> {
     if (mounted) setState(() {});
   }
 
-  void toast(String m) {
+  void onVc() {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(m), duration: const Duration(seconds: 2)));
+    final v = vc;
+    if (repMode == 'ab' && v != null && abA != null && abB != null) {
+      if (v.value.position >= abB!) v.seekTo(abA!);
+    }
+    setState(() {});
   }
+
+  void showPill(String m) {
+    if (!mounted) return;
+    setState(() => pill = m);
+    pillT?.cancel();
+    pillT = Timer(const Duration(milliseconds: 1400), () {
+      if (mounted) setState(() => pill = null);
+    });
+  }
+
+  void toast(String m) => showPill(m);
 
   void loadEpg() {
     epg = [];
@@ -128,7 +193,60 @@ class _PlayerState extends State<Player> {
     });
   }
 
+  // ---- download speed (estimated from how fast the buffer grows) ----
+  void sampleSpeed() {
+    if (!mounted) return;
+    final v = vc;
+    final now = DateTime.now();
+    if (v == null || !v.value.isInitialized || v.value.buffered.isEmpty) {
+      lastAt = now;
+      return;
+    }
+    final end = v.value.buffered.last.end;
+    final dur = v.value.duration.inMilliseconds;
+    if (!widget.live && resolvedSize > 0 && dur > 0) {
+      final grownMs = (end - lastBuf).inMilliseconds;
+      final secs = now.difference(lastAt).inMilliseconds / 1000.0;
+      if (secs > 0) {
+        final bytes = (grownMs > 0 ? grownMs : 0) * (resolvedSize / dur);
+        final inst = bytes / secs / 1024.0;
+        kbps = kbps < 0 ? inst : (kbps * 0.5 + inst * 0.5);
+      }
+    }
+    lastBuf = end;
+    lastAt = now;
+    if (loading || v.value.isBuffering) setState(() {});
+  }
+
+  String get speedText {
+    if (kbps < 0) return '-- KB/s';
+    return kbps >= 1024
+        ? '${(kbps / 1024).toStringAsFixed(1)}MB/s'
+        : '${kbps.toStringAsFixed(1)}KB/s';
+  }
+
   String lastErr = '';
+
+  String get decMode {
+    final k = widget.live ? 'dec_live' : 'dec_vod';
+    final chosen = Cfg.gs('${k}_p', '');
+    if (chosen.isNotEmpty) return chosen;
+    final st = Cfg.gs(k, widget.live ? 'auto' : 'hw');
+    // "hw" is the stored default: hardware decoder first (engine default), no forced switch
+    return st == 'hw' ? 'hwdef' : st;
+  }
+
+  String get decShown {
+    switch (decMode) {
+      case 'hw':
+      case 'hwdef':
+        return 'Hardware';
+      case 'sw':
+        return 'Software';
+      default:
+        return 'Auto';
+    }
+  }
 
   Future<void> play(String url, String? alt, {int attempt = 0}) async {
     final my = ++gen;
@@ -137,11 +255,15 @@ class _PlayerState extends State<Player> {
       vc = null;
       loading = true;
       err = null;
+      kbps = -1;
+      lastBuf = Duration.zero;
     });
     await disposeLater(old);
     if (!mounted || my != gen) return;
     final real = widget.live ? url : await resolveFinal(url);
     if (!mounted || my != gen) return;
+    final dm = decOverride ?? decMode;
+    _applyDecoder(dm == 'hwdef' ? 'auto' : dm);
     final c = VideoPlayerController.networkUrl(Uri.parse(real),
         httpHeaders: attempt == 1 ? const <String, String>{} : ua);
     try {
@@ -150,17 +272,22 @@ class _PlayerState extends State<Player> {
         await c.dispose();
         return;
       }
-      c.addListener(() {
-        if (mounted) setState(() {});
-      });
+      c.addListener(onVc);
       await c.play();
       if (speed != 1.0 && !widget.live) await c.setPlaybackSpeed(speed);
       if (muted) await c.setVolume(0);
+      if (repMode == 'one') await c.setLooping(true);
+      final ra = resumeAt;
+      if (ra != null && !widget.live) {
+        resumeAt = null;
+        await c.seekTo(ra);
+      }
       setState(() {
         vc = c;
         loading = false;
       });
       poke();
+      applySubs();
     } catch (e) {
       try {
         await c.dispose();
@@ -172,6 +299,11 @@ class _PlayerState extends State<Player> {
         play(url, alt, attempt: 1);
       } else if (alt != null) {
         play(alt, null);
+      } else if (dm == 'hw' && !decRetried) {
+        // hardware-only failed: fall back to the automatic decoder once
+        decRetried = true;
+        decOverride = 'auto';
+        play(cur.url, cur.alt);
       } else {
         var m = lastErr.replaceAll('\n', ' ');
         if (m.length > 160) m = m.substring(0, 160);
@@ -187,7 +319,9 @@ class _PlayerState extends State<Player> {
     setState(() => show = true);
     hideT?.cancel();
     hideT = Timer(const Duration(seconds: 5), () {
-      if (mounted && menu == null && vc?.value.isPlaying == true) setState(() => show = false);
+      if (mounted && menu == null && !scrub && vc?.value.isPlaying == true) {
+        setState(() => show = false);
+      }
     });
   }
 
@@ -239,26 +373,20 @@ class _PlayerState extends State<Player> {
     idx = n;
     widget.onIndex?.call(idx);
     loadEpg();
+    abA = null;
+    abB = null;
+    if (repMode == 'ab') repMode = 'off';
+    decOverride = null;
+    decRetried = false;
     play(cur.url, cur.alt);
   }
 
-  void setFit(BoxFit f) {
-    setState(() {
-      fit = f;
-      menu = 'main';
-    });
-  }
-
+  // The first button cycles the picture size, like the reference player
   void cycleFit() {
-    final f = fit == BoxFit.contain
-        ? BoxFit.cover
-        : (fit == BoxFit.cover ? BoxFit.fill : BoxFit.contain);
-    setState(() => fit = f);
-    showOsd(Icons.fit_screen, f == BoxFit.contain ? 'Fit' : (f == BoxFit.cover ? 'Zoom' : 'Stretch'));
+    setState(() => sizeMode = (sizeMode + 1) % sizeNames.length);
+    showPill(sizeNames[sizeMode]);
     poke();
   }
-
-  String get fitName => fit == BoxFit.contain ? 'Fit' : (fit == BoxFit.cover ? 'Zoom' : 'Stretch');
 
   void setSpeed(double x) {
     if (widget.live) {
@@ -272,7 +400,7 @@ class _PlayerState extends State<Player> {
     });
   }
 
-  // ---- audio tracks (works only if the installed player engine supports it) ----
+  // ---- audio / subtitle tracks (uses what the installed player engine offers) ----
   String trackId(dynamic t) {
     try {
       return '${(t as dynamic).id}';
@@ -286,43 +414,184 @@ class _PlayerState extends State<Player> {
       final d = t as dynamic;
       final l = '${d.label ?? ''}'.trim();
       final g = '${d.language ?? ''}'.trim();
-      return l.isNotEmpty ? l : (g.isNotEmpty ? g : 'Track ${trackId(t)}');
+      return l.isNotEmpty ? l : (g.isNotEmpty ? langName(g) : 'Track ${trackId(t)}');
     } catch (_) {
       return 'Track';
     }
   }
 
-  Future<void> openAudio() async {
+  static const _langs = {
+    'en': 'English', 'eng': 'English', 'ur': 'Urdu', 'urd': 'Urdu', 'hi': 'Hindi',
+    'hin': 'Hindi', 'ar': 'Arabic', 'ara': 'Arabic', 'es': 'Spanish', 'spa': 'Spanish',
+    'fr': 'French', 'fra': 'French', 'fre': 'French', 'de': 'German', 'ger': 'German',
+    'deu': 'German', 'tr': 'Turkish', 'tur': 'Turkish', 'pa': 'Punjabi', 'pan': 'Punjabi',
+  };
+
+  String langName(String code) => _langs[code.toLowerCase()] ?? code;
+
+  String trackName(String title, String lang, int i) {
+    final ln = lang.isEmpty ? '' : langName(lang);
+    if (title.isNotEmpty && ln.isNotEmpty && title.toLowerCase() != ln.toLowerCase()) {
+      return '$title - $ln';
+    }
+    if (title.isNotEmpty) return title;
+    if (ln.isNotEmpty) return ln;
+    return 'Track ${i + 1}';
+  }
+
+  Future<List<Map<String, String>>> tracks(String kind) async {
     final v = vc;
-    if (v == null) return;
+    final out = <Map<String, String>>[];
+    if (v == null) return out;
     try {
-      final tr = await (v as dynamic).getAudioTracks();
-      if (tr is List && tr.isNotEmpty) {
-        setState(() {
-          audioTracks = tr;
-          menu = 'audio';
-        });
-      } else {
-        toast('No other audio tracks found in this stream.');
+      final mi = await (v as dynamic).getMediaInfo();
+      final l = kind == 'audio' ? mi?.audio : mi?.subtitle;
+      if (l is List) {
+        for (var i = 0; i < l.length; i++) {
+          final t = l[i] as dynamic;
+          var id = '$i';
+          try {
+            id = '${t.index}';
+          } catch (_) {}
+          var lang = '', title = '';
+          try {
+            final md = t.metadata;
+            if (md is Map) {
+              lang = '${md['language'] ?? ''}'.trim();
+              title = '${md['title'] ?? ''}'.trim();
+            }
+          } catch (_) {}
+          out.add({'id': id, 'label': trackName(title, lang, i), 'lang': lang});
+        }
       }
+    } catch (_) {}
+    if (out.isEmpty && kind == 'audio') {
+      try {
+        final tr = await (v as dynamic).getAudioTracks();
+        if (tr is List) {
+          for (final t in tr) {
+            out.add({'id': trackId(t), 'label': trackLabel(t), 'lang': ''});
+          }
+        }
+      } catch (_) {}
+    }
+    return out;
+  }
+
+  Future<void> openAudio() async {
+    audioTracks = await tracks('audio');
+    if (mounted) setState(() => menu = 'audio');
+  }
+
+  Future<void> openSubs() async {
+    subTracks = await tracks('subtitle');
+    if (mounted) setState(() => menu = 'sub');
+  }
+
+  Future<void> _selAudio(dynamic v, String id) async {
+    try {
+      await v.setAudioTracks(<int>[int.parse(id)]);
     } catch (_) {
-      toast('Audio track selection is not supported on this device.');
+      await v.selectAudioTrack(id);
     }
   }
 
-  Future<void> pickAudio(dynamic t) async {
+  Future<void> pickAudio(Map<String, String>? t) async {
     final v = vc;
     if (v == null) return;
     try {
-      if (t != null) {
-        await (v as dynamic).selectAudioTrack(trackId(t));
-        audioSel = trackId(t);
-      } else {
+      if (t == null) {
         audioSel = '';
+        audioLabel = '';
+        if (audioTracks.isNotEmpty) await _selAudio(v, audioTracks.first['id']!);
+      } else {
+        await _selAudio(v, t['id']!);
+        audioSel = t['id']!;
+        audioLabel = t['label']!;
       }
-      setState(() => menu = 'main');
     } catch (_) {
       toast('Could not switch the audio track.');
+    }
+    if (mounted) setState(() => menu = 'main');
+  }
+
+  // Applies the subtitle choice to the video (Off / Auto = preferred language / one track)
+  Future<void> applySubs() async {
+    final v = vc;
+    if (v == null) return;
+    try {
+      if (subSel == 'off') {
+        await (v as dynamic).setSubtitleTracks(<int>[]);
+      } else if (subSel == 'auto') {
+        final l = await tracks('subtitle');
+        if (l.isEmpty) return;
+        final want = Cfg.gs('os_lang', 'en').toLowerCase();
+        var pickIt = l.first;
+        for (final t in l) {
+          final lg = (t['lang'] ?? '').toLowerCase();
+          if (lg.isNotEmpty && (lg == want || lg.startsWith(want) || want.startsWith(lg))) {
+            pickIt = t;
+            break;
+          }
+        }
+        await (v as dynamic).setSubtitleTracks(<int>[int.parse(pickIt['id']!)]);
+      } else {
+        await (v as dynamic).setSubtitleTracks(<int>[int.parse(subSel)]);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> pickSub(String id, String label) async {
+    subSel = id;
+    subLabel = label;
+    await applySubs();
+    if (mounted) setState(() => menu = 'main');
+  }
+
+  // ---- repeat ----
+  void pickRepeat(String m) {
+    final v = vc;
+    if (m == 'ab') {
+      final pos = v?.value.position ?? Duration.zero;
+      if (repMode != 'ab' || abB != null) {
+        repMode = 'ab';
+        abA = pos;
+        abB = null;
+        v?.setLooping(false);
+        setState(() => menu = null);
+        showPill('A set at ${fmt(pos)}. Choose A-B Loop again to set B');
+      } else {
+        if (pos > abA!) {
+          abB = pos;
+          showPill('A-B loop on');
+          v?.seekTo(abA!);
+        } else {
+          showPill('B must be after A');
+        }
+        setState(() => menu = null);
+      }
+      return;
+    }
+    repMode = m;
+    abA = null;
+    abB = null;
+    v?.setLooping(m == 'one');
+    setState(() => menu = 'main');
+  }
+
+  // ---- decoder ----
+  Future<void> pickDecoder(String m) async {
+    final v = vc;
+    final k = widget.live ? 'dec_live' : 'dec_vod';
+    await Cfg.ps('${k}_p', m);
+    decOverride = null;
+    decRetried = false;
+    setState(() => menu = null);
+    if (widget.live) {
+      play(cur.url, cur.alt);
+    } else {
+      resumeAt = v?.value.position;
+      play(cur.url, cur.alt);
     }
   }
 
@@ -416,33 +685,90 @@ class _PlayerState extends State<Player> {
   }
 
   // ---- UI ----
-  int bufPct(VideoPlayerController v) {
+  int bufPct(VideoPlayerController? v) {
+    if (v == null || !v.value.isInitialized) return 0;
     final b = v.value.buffered;
     if (b.isEmpty) return 0;
     final ahead = b.last.end - v.value.position;
     return (ahead.inMilliseconds / 100).clamp(0, 100).round();
   }
 
-  Widget ctl(IconData i, VoidCallback? f, {double size = 26}) =>
-      IconButton(icon: Icon(i), iconSize: size, onPressed: f);
+  String get idLabel {
+    final k = widget.kind;
+    if (k == 'series') return 'Episode ID';
+    if (k == 'movie') return 'Movie ID';
+    if (widget.live) return 'Channel ID';
+    return 'Stream ID';
+  }
 
-  Widget overlay(VideoPlayerController? v) {
+  Widget ctl(IconData i, VoidCallback? f, double k, {Color? color, double size = 24}) => IconButton(
+        icon: Icon(i, color: color ?? (f == null ? Colors.white30 : Colors.white)),
+        iconSize: size * k,
+        padding: EdgeInsets.all(8 * k),
+        constraints: const BoxConstraints(),
+        onPressed: f,
+      );
+
+  Widget seekBar(VideoPlayerController? v, double k) {
+    final dur = v?.value.duration.inMilliseconds ?? 0;
+    final pos = v?.value.position.inMilliseconds ?? 0;
+    final ok = v != null && v.value.isInitialized && dur > 0;
+    final val = scrub ? scrubVal : (ok ? (pos / dur).clamp(0.0, 1.0).toDouble() : 0.0);
+    return SliderTheme(
+      data: SliderThemeData(
+        trackHeight: 3,
+        activeTrackColor: const Color(0xFF55AEE8),
+        inactiveTrackColor: Colors.white,
+        thumbColor: scrub ? const Color(0xFFFFEB7A) : const Color(0xFF55AEE8),
+        thumbShape: RoundSliderThumbShape(enabledThumbRadius: 6 * k),
+        overlayShape: SliderComponentShape.noOverlay,
+        trackShape: const RectangularSliderTrackShape(),
+      ),
+      child: Slider(
+        value: val,
+        onChangeStart: ok
+            ? (x) {
+                scrub = true;
+                scrubVal = x;
+                hideT?.cancel();
+              }
+            : null,
+        onChanged: ok ? (x) => setState(() => scrubVal = x) : null,
+        onChangeEnd: ok
+            ? (x) {
+                v!.seekTo(Duration(milliseconds: (x * dur).round()));
+                setState(() => scrub = false);
+                poke();
+              }
+            : null,
+      ),
+    );
+  }
+
+  Widget overlay(VideoPlayerController? v, double w, double k) {
     final size = v?.value.size;
     final live = widget.live;
     final playing = v?.value.isPlaying == true;
     final now = epg.isNotEmpty && epg[0].isNotEmpty ? epg[0] : 'No Program Found';
     final next = epg.length > 1 && epg[1].isNotEmpty ? epg[1] : 'No Program Found';
+    final pos = v?.value.position ?? Duration.zero;
+    final dur = v?.value.duration ?? Duration.zero;
+    final txt = TextStyle(fontSize: 13 * k, color: Colors.white);
     return ExcludeFocus(
       child: Column(children: [
+        // ---- top: back arrow, title, EXO resolution badge ----
         Container(
           decoration: const BoxDecoration(
               gradient: LinearGradient(
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
-                  colors: [Colors.black87, Colors.transparent])),
-          padding: const EdgeInsets.fromLTRB(8, 8, 16, 16),
+                  colors: [Colors.black54, Colors.transparent])),
+          padding: EdgeInsets.fromLTRB(w * 0.06, 10 * k, w * 0.03, 10 * k),
           child: Row(children: [
-            IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context)),
+            IconButton(
+                icon: const Icon(Icons.arrow_back, color: Colors.white70),
+                iconSize: 26 * k,
+                onPressed: () => Navigator.pop(context)),
             if (live)
               Container(
                 margin: const EdgeInsets.only(right: 10),
@@ -456,105 +782,143 @@ class _PlayerState extends State<Player> {
                   textAlign: TextAlign.center,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  style: TextStyle(fontSize: 15 * k, fontWeight: FontWeight.bold)),
             ),
             if (size != null && size.width > 0)
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding: EdgeInsets.symmetric(horizontal: 12 * k, vertical: 5 * k),
                 decoration: BoxDecoration(
-                    border: Border.all(color: Colors.white38),
-                    borderRadius: BorderRadius.circular(12)),
-                child: Text('${size.width.toInt()}x${size.height.toInt()}',
-                    style: const TextStyle(fontSize: 12)),
-              ),
+                    color: const Color(0xFF4A2A10),
+                    border: Border.all(color: const Color(0xFFA85A1F)),
+                    borderRadius: BorderRadius.circular(20 * k)),
+                child: Text('EXO: ${size.width.toInt()}x${size.height.toInt()}',
+                    style: TextStyle(
+                        fontSize: 12 * k,
+                        fontWeight: FontWeight.w500,
+                        color: const Color(0xFFF1DFCB))),
+              )
+            else
+              SizedBox(width: 48 * k),
           ]),
         ),
         const Spacer(),
+        // ---- bottom: seek bar and the control row ----
         Container(
           decoration: const BoxDecoration(
               gradient: LinearGradient(
                   begin: Alignment.bottomCenter,
                   end: Alignment.topCenter,
-                  colors: [Colors.black87, Colors.transparent])),
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
+                  colors: [Colors.black54, Colors.transparent])),
+          padding: EdgeInsets.fromLTRB(w * 0.07, 8 * k, w * 0.07, 12 * k),
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             if (live) ...[
               Text('Now: $now',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.orange, fontSize: 16)),
+                  style: TextStyle(color: Colors.orange, fontSize: 15 * k)),
               Text('Next: $next',
-                  maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16)),
-              const SizedBox(height: 4),
+                  maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 15 * k)),
+              SizedBox(height: 4 * k),
             ],
             Row(children: [
-              Text(live ? '00:00' : fmt(v?.value.position ?? Duration.zero),
-                  style: const TextStyle(fontSize: 13)),
-              const SizedBox(width: 10),
+              Text(live ? '00:00' : fmt(scrub ? Duration(milliseconds: (scrubVal * dur.inMilliseconds).round()) : pos),
+                  style: txt),
+              SizedBox(width: 6 * k),
               Expanded(
                 child: live
                     ? Container(height: 3, color: Colors.white)
-                    : (v == null
-                        ? const SizedBox()
-                        : VideoProgressIndicator(v,
-                            allowScrubbing: true,
-                            colors: const VideoProgressColors(playedColor: accent))),
+                    : seekBar(v, k),
               ),
-              const SizedBox(width: 10),
+              SizedBox(width: 6 * k),
               live
-                  ? const Text('Live',
-                      style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold))
-                  : Text(fmt(v?.value.duration ?? Duration.zero),
-                      style: const TextStyle(fontSize: 13)),
+                  ? Text('Live',
+                      style: TextStyle(
+                          color: Colors.redAccent, fontWeight: FontWeight.bold, fontSize: 13 * k))
+                  : Text(fmt(dur), style: txt),
             ]),
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              ctl(Icons.fit_screen, cycleFit),
-              ctl(Icons.picture_in_picture_alt, () => nat('enterPip')),
-              ctl(Icons.skip_previous, () => zap(-1), size: 30),
-              ctl(Icons.replay_10, live ? null : () => seek(-10)),
-              IconButton(
-                  iconSize: 54,
-                  icon: Icon(playing ? Icons.pause_circle_outline : Icons.play_circle_outline),
-                  onPressed: toggle),
-              ctl(Icons.forward_10, live ? null : () => seek(10)),
-              ctl(Icons.skip_next, () => zap(1), size: 30),
-              ctl(muted ? Icons.volume_off : Icons.volume_up, mute),
-              ctl(Icons.settings, () => setState(() => menu = 'main')),
-            ]),
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: w * 0.05),
+              child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                ctl(Icons.aspect_ratio, cycleFit, k),
+                ctl(Icons.picture_in_picture_alt, () => nat('enterPip'), k),
+                ctl(Icons.memory, () => setState(() => menu = 'dec'), k),
+                ctl(Icons.skip_previous, () => zap(-1), k, size: 26),
+                ctl(Icons.replay_30, live ? null : () => seek(-30), k, size: 28),
+                InkResponse(
+                  onTap: toggle,
+                  child: Container(
+                    width: 38 * k,
+                    height: 38 * k,
+                    decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
+                    child: Icon(playing ? Icons.pause : Icons.play_arrow,
+                        color: Colors.black, size: 26 * k),
+                  ),
+                ),
+                ctl(Icons.forward_30, live ? null : () => seek(30), k, size: 28),
+                ctl(Icons.skip_next, () => zap(1), k, size: 26),
+                ctl(muted ? Icons.volume_off : Icons.volume_up, mute, k, color: Colors.white70),
+                ctl(Icons.high_quality, () {
+                  final z = v?.value.size;
+                  showPill(z != null && z.width > 0
+                      ? 'Quality ${z.width.toInt()}x${z.height.toInt()}'
+                      : 'Quality: loading');
+                }, k),
+                ctl(Icons.settings, () => setState(() => menu = 'main'), k),
+              ]),
+            ),
           ]),
         ),
       ]),
     );
   }
 
-  Widget menuPanel(double h) {
-    Widget hdr(String t) => ListTile(
-          dense: true,
-          leading: const Icon(Icons.arrow_back, size: 20),
-          title: Text(t, style: const TextStyle(fontWeight: FontWeight.bold)),
-          onTap: () => setState(() => menu = 'main'),
+  Widget menuPanel(double w, double h, double k) {
+    final rowH = 42 * k;
+    final fs = 14 * k;
+    Widget hdr(String t, {String? to = 'main'}) => Column(mainAxisSize: MainAxisSize.min, children: [
+          SizedBox(
+            height: rowH,
+            child: ListTile(
+              contentPadding: EdgeInsets.symmetric(horizontal: 12 * k),
+              minLeadingWidth: 24 * k,
+              leading: Icon(Icons.skip_previous, size: 20 * k),
+              title: Text(t, style: TextStyle(fontWeight: FontWeight.bold, fontSize: fs)),
+              onTap: () => setState(() => menu = to),
+            ),
+          ),
+          const Divider(height: 1, color: Colors.white24),
+        ]);
+    Widget opt(String t, bool on, VoidCallback f, {bool first = false}) => SizedBox(
+          height: rowH,
+          child: ListTile(
+            autofocus: first,
+            contentPadding: EdgeInsets.symmetric(horizontal: 12 * k),
+            minLeadingWidth: 30 * k,
+            leading: SizedBox(width: 30 * k, child: on ? Icon(Icons.check, size: 22 * k) : null),
+            title: Text(t, style: TextStyle(fontSize: fs), maxLines: 1, overflow: TextOverflow.ellipsis),
+            onTap: f,
+          ),
         );
-    Widget opt(String t, bool on, VoidCallback f, {bool first = false}) => ListTile(
-          dense: true,
-          autofocus: first,
-          leading: on ? const Icon(Icons.check, size: 20) : const SizedBox(width: 20),
-          title: Text(t),
-          onTap: f,
-        );
-    Widget row(IconData i, String t, String v, VoidCallback f, {bool first = false}) => ListTile(
-          dense: true,
-          autofocus: first,
-          leading: Icon(i, color: Colors.orange),
-          title: Text(t),
-          trailing: Text(v, style: const TextStyle(color: Colors.white60)),
-          onTap: f,
+    Widget row(Widget icon, String t, String v, VoidCallback f, {bool first = false}) => SizedBox(
+          height: rowH,
+          child: ListTile(
+            autofocus: first,
+            contentPadding: EdgeInsets.symmetric(horizontal: 12 * k),
+            minLeadingWidth: 28 * k,
+            leading: icon,
+            title: Text(t, style: TextStyle(fontSize: fs)),
+            trailing: Text(v, style: TextStyle(fontSize: fs, color: Colors.white60)),
+            onTap: f,
+          ),
         );
     final List<Widget> rows;
+    var width = 320 * k;
+    var left = false;
     switch (menu) {
       case 'speed':
         rows = [
           hdr('Playback speed'),
-          for (final x in const [0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
+          for (final x in const [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0])
             opt(x == 1.0 ? 'Normal' : '${x}x', speed == x, () => setSpeed(x), first: x == 1.0),
         ];
         break;
@@ -562,37 +926,70 @@ class _PlayerState extends State<Player> {
         rows = [
           hdr('Audio track'),
           opt('Auto', audioSel.isEmpty, () => pickAudio(null), first: true),
-          for (final t in audioTracks) opt(trackLabel(t), audioSel == trackId(t), () => pickAudio(t)),
+          for (final t in audioTracks) opt(t['label']!, audioSel == t['id'], () => pickAudio(t)),
         ];
         break;
-      case 'fit':
+      case 'sub':
         rows = [
-          hdr('Video size'),
-          opt('Fit', fit == BoxFit.contain, () => setFit(BoxFit.contain), first: true),
-          opt('Zoom', fit == BoxFit.cover, () => setFit(BoxFit.cover)),
-          opt('Stretch', fit == BoxFit.fill, () => setFit(BoxFit.fill)),
+          hdr('Subtitles'),
+          opt('Off', subSel == 'off', () => pickSub('off', 'Off')),
+          opt('Auto', subSel == 'auto', () => pickSub('auto', 'Auto'), first: true),
+          for (final t in subTracks) opt(t['label']!, subSel == t['id'], () => pickSub(t['id']!, t['label']!)),
+        ];
+        break;
+      case 'repeat':
+        rows = [
+          hdr('Repeat'),
+          opt('Off', repMode == 'off', () => pickRepeat('off'), first: true),
+          opt('Repeat one', repMode == 'one', () => pickRepeat('one')),
+          opt('A-B Loop', repMode == 'ab', () => pickRepeat('ab')),
+        ];
+        break;
+      case 'dec':
+        left = true;
+        final m = decMode;
+        rows = [
+          hdr(widget.live ? 'Live Player Decoder' : 'VOD Player Decoder', to: null),
+          opt('Auto', m == 'auto', () => pickDecoder('auto')),
+          opt('Hardware only', m == 'hw' || m == 'hwdef', () => pickDecoder('hw'), first: true),
+          opt('Software preferred', m == 'sw', () => pickDecoder('sw')),
         ];
         break;
       default:
+        width = 240 * k;
         rows = [
-          row(Icons.speed, 'Playback speed', speed == 1.0 ? 'Normal' : '${speed}x',
-              () => setState(() => menu = 'speed'),
+          row(Icon(Icons.speed, color: Colors.white54, size: 24 * k), 'Playback speed',
+              speed == 1.0 ? 'Normal' : '${speed}x', () => setState(() => menu = 'speed'),
               first: true),
-          row(Icons.music_note, 'Audio track', audioSel.isEmpty ? 'Auto' : 'Selected', openAudio),
-          row(Icons.closed_caption, 'Subtitles', 'Auto',
-              () => toast('No subtitle tracks found in this stream.')),
-          row(Icons.aspect_ratio, 'Video size', fitName, () => setState(() => menu = 'fit')),
+          row(Icon(Icons.music_note, color: const Color(0xFFFB8C00), size: 26 * k), 'Audio track',
+              audioSel.isEmpty ? 'Auto' : audioLabel, openAudio),
+          row(
+              CircleAvatar(
+                  radius: 13 * k,
+                  backgroundColor: const Color(0xFFF57C00),
+                  child: Text('CC',
+                      style: TextStyle(
+                          fontSize: 10 * k, fontWeight: FontWeight.bold, color: Colors.white))),
+              'Subtitles',
+              subSel == 'off' ? 'Off' : (subSel == 'auto' ? 'Auto' : subLabel),
+              openSubs),
+          row(Icon(Icons.repeat, size: 24 * k), 'Repeat',
+              repMode == 'off' ? 'Off' : (repMode == 'one' ? 'One' : 'A-B'),
+              () => setState(() => menu = 'repeat')),
+          row(Icon(Icons.memory, size: 24 * k), 'Decoder:', decShown,
+              () => setState(() => menu = 'dec')),
         ];
     }
-    final maxH = h - 110 < 120 ? 120.0 : h - 110;
+    final maxH = h - 40 * k < 120 ? 120.0 : h - 40 * k;
     return Positioned(
-      right: 16,
-      bottom: 90,
+      right: left ? null : 48 * k,
+      left: left ? w * 0.27 : null,
+      bottom: 52 * k,
       child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: 340, maxHeight: maxH),
+        constraints: BoxConstraints(maxWidth: width, minWidth: width, maxHeight: maxH),
         child: Material(
-          color: const Color(0xF2202026),
-          borderRadius: BorderRadius.circular(14),
+          color: const Color(0xFF212121),
+          borderRadius: BorderRadius.circular(12 * k),
           clipBehavior: Clip.antiAlias,
           child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: rows)),
         ),
@@ -604,7 +1001,7 @@ class _PlayerState extends State<Player> {
     final sz = v.value.size;
     return SizedBox.expand(
       child: FittedBox(
-        fit: fit,
+        fit: sizeFits[sizeMode],
         clipBehavior: Clip.hardEdge,
         child: SizedBox(
           width: sz.width == 0 ? 16 : sz.width,
@@ -615,12 +1012,39 @@ class _PlayerState extends State<Player> {
     );
   }
 
+  // ID, speed and percent while the video is loading or buffering
+  Widget loadBox(VideoPlayerController? v, double k) {
+    final id = cur.id;
+    return Center(
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: 28 * k, vertical: 18 * k),
+        decoration: BoxDecoration(
+            color: const Color(0xFF1E2029),
+            border: Border.all(color: const Color(0xFF2E303A)),
+            borderRadius: BorderRadius.circular(14 * k)),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          if (id != null && id.isNotEmpty)
+            Text('$idLabel: $id',
+                style: TextStyle(fontSize: 15 * k, fontWeight: FontWeight.bold, color: Colors.white)),
+          SizedBox(height: 6 * k),
+          Text(speedText, style: TextStyle(fontSize: 14 * k, color: Colors.white)),
+          SizedBox(height: 4 * k),
+          Text('${bufPct(v)}%', style: TextStyle(fontSize: 14 * k, color: Colors.white)),
+        ]),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext c) {
     final v = vc;
     final pip = inPip.value;
     final hasErr = err != null || v?.value.hasError == true;
-    final h = MediaQuery.of(c).size.height;
+    final mq = MediaQuery.of(c).size;
+    final h = mq.height, w = mq.width;
+    final k = (h / 360).clamp(0.9, 1.8).toDouble();
+    final busy = loading || (v != null && v.value.isBuffering);
+    final cap = (v != null && subSel != 'off') ? v.value.caption.text : '';
     return PopScope(
       canPop: menu == null,
       onPopInvokedWithResult: (didPop, result) {
@@ -650,15 +1074,30 @@ class _PlayerState extends State<Player> {
               onHorizontalDragEnd: (_) => hEnd(),
               child: Stack(children: [
                 if (v != null && v.value.isInitialized) video(v),
-                if (loading || (v != null && v.value.isBuffering))
-                  const Center(child: CircularProgressIndicator()),
+                if (!pip && cap.isNotEmpty)
+                  Positioned(
+                    left: 40,
+                    right: 40,
+                    bottom: show ? 110 * k : 24 * k,
+                    child: Center(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                            color: Colors.black54, borderRadius: BorderRadius.circular(6)),
+                        child: Text(cap,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 16 * k, color: Colors.white)),
+                      ),
+                    ),
+                  ),
+                if (busy && !hasErr && !pip) loadBox(v, k),
                 if (hasErr)
                   Center(
                       child: Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 40),
                           child: Text(err ?? 'A stream error occurred.',
                               textAlign: TextAlign.center))),
-                if (!pip && (show || hasErr)) Positioned.fill(child: overlay(v)),
+                if (!pip && (show || hasErr)) Positioned.fill(child: overlay(v, w, k)),
                 if (!pip && Cfg.gb('dbg_overlay', false) && v != null && v.value.isInitialized)
                   Positioned(
                     left: 10,
@@ -688,7 +1127,18 @@ class _PlayerState extends State<Player> {
                       ]),
                     ),
                   ),
-                if (!pip && menu != null) menuPanel(h),
+                if (!pip && pill != null)
+                  Align(
+                    alignment: const Alignment(0, -0.45),
+                    child: Container(
+                      padding: EdgeInsets.symmetric(horizontal: 22 * k, vertical: 9 * k),
+                      decoration: BoxDecoration(
+                          color: const Color(0xCC5B5B3B),
+                          borderRadius: BorderRadius.circular(22 * k)),
+                      child: Text(pill!, style: TextStyle(fontSize: 14 * k, color: Colors.white)),
+                    ),
+                  ),
+                if (!pip && menu != null) menuPanel(w, h, k),
               ]),
             ),
           ),

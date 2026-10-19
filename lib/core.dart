@@ -94,8 +94,15 @@ class SharedPreferences {
   }
 }
 
+// While a detail page or the player is open, background indexing waits (so it never slows them down)
+int uiBusy = 0;
+
+// Total size in bytes of the last resolved video file (0 = unknown); used for the speed readout
+int resolvedSize = 0;
+
 // Follows redirects by hand (the video engine refuses http -> https redirects)
 Future<String> resolveFinal(String url) async {
+  resolvedSize = 0;
   final hc = HttpClient()..connectionTimeout = const Duration(seconds: 8);
   try {
     var u = Uri.parse(url);
@@ -110,6 +117,10 @@ Future<String> resolveFinal(String url) async {
         u = u.resolve(loc);
         continue;
       }
+      final cr = rs.headers.value('content-range') ?? '';
+      final tot = cr.contains('/') ? int.tryParse(cr.split('/').last.trim()) : null;
+      resolvedSize = tot ?? (rs.statusCode == 200 ? rs.contentLength : 0);
+      if (resolvedSize < 0) resolvedSize = 0;
       return u.toString();
     }
     return u.toString();
@@ -266,15 +277,26 @@ class Pi {
 class It {
   final String id, name, ln, icon, ext;
   final int cat, added;
-  It(this.id, this.name, this.icon, this.ext, this.cat, this.added) : ln = name.toLowerCase();
+  final double rating;
+  It(this.id, this.name, this.icon, this.ext, this.cat, this.added, [this.rating = 0])
+      : ln = name.toLowerCase();
 
-  Map<String, dynamic> toJson() =>
-      {'id': id, 'name': name, 'icon': icon, 'ext': ext, 'cat': cat, 'added': added};
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'icon': icon,
+        'ext': ext,
+        'cat': cat,
+        'added': added,
+        'rating': rating
+      };
 
   factory It.fromJson(Map m) => It('${m['id']}', '${m['name']}', '${m['icon']}', '${m['ext']}',
-      int.tryParse('${m['cat']}') ?? 0, int.tryParse('${m['added']}') ?? 0);
+      int.tryParse('${m['cat']}') ?? 0, int.tryParse('${m['added']}') ?? 0,
+      double.tryParse('${m['rating']}') ?? 0);
 
-  String get line => '${_c(id)}\t${_c(icon)}\t${_c(ext)}\t$cat\t$added\t${_c(name)}\n';
+  String get line =>
+      '${_c(id)}\t${_c(icon)}\t${_c(ext)}\t$cat\t$added\t$rating\t${_c(name)}\n';
 }
 
 String _c(String s) => s.replaceAll(RegExp(r'[\t\r\n]'), ' ');
@@ -285,8 +307,9 @@ It _mk(Map m, String type) {
   final icon = clean(series ? m['cover'] : m['stream_icon']);
   final added = int.tryParse('${(series ? m['last_modified'] : m['added']) ?? 0}') ?? 0;
   final ext = clean(m['container_extension']);
+  final rt = double.tryParse(clean(m['rating'])) ?? 0;
   return It(id, '${m['name'] ?? ''}', icon, ext.isEmpty ? 'mp4' : ext,
-      int.tryParse('${m['category_id']}') ?? 0, added);
+      int.tryParse('${m['category_id']}') ?? 0, added, rt);
 }
 
 // Runs in a background isolate
@@ -308,9 +331,9 @@ List<It> readCache(String path) {
     if (!f.existsSync()) return out;
     for (final line in f.readAsLinesSync()) {
       final p = line.split('\t');
-      if (p.length < 6) continue;
-      out.add(It(p[0], p.sublist(5).join(' '), p[1], p[2], int.tryParse(p[3]) ?? 0,
-          int.tryParse(p[4]) ?? 0));
+      if (p.length < 7) continue;
+      out.add(It(p[0], p.sublist(6).join(' '), p[1], p[2], int.tryParse(p[3]) ?? 0,
+          int.tryParse(p[4]) ?? 0, double.tryParse(p[5]) ?? 0));
     }
   } catch (_) {}
   return out;
@@ -375,11 +398,17 @@ class Lib {
     final have = byCat[id];
     if (have != null) return have;
     if (type == 'live' && full) return <It>[];
-    final l = await s.fetchItems(itemAction[type]!, '&category_id=$id', type);
+    final l = await _fetchShared(id);
     byCat[id] = l;
     _all = null;
     tick.value++;
     return l;
+  }
+
+  // One request per category, shared between the indexer and a category the user opens
+  final Map<String, Future<List<It>>> _pend = {};
+  Future<List<It>> _fetchShared(String id) {
+    return _pend[id] ??= _fetchCat(id).whenComplete(() => _pend.remove(id));
   }
 
   Future<void> start({bool force = false}) {
@@ -396,6 +425,7 @@ class Lib {
       _syncing = false;
       quick = null;
       quickF = null;
+      _pend.clear();
       _dropCache();
       tick.value++;
     }
@@ -407,7 +437,7 @@ class Lib {
       var dir = await nat('cacheDir');
       if (dir is! String || dir.isEmpty) dir = Directory.systemTemp.path;
       if (!Directory('$dir').existsSync()) return null;
-      return '$dir/lib_${type}_${s.user.hashCode.abs()}.tsv';
+      return '$dir/lib2_${type}_${s.user.hashCode.abs()}.tsv';
     } catch (_) {
       return null;
     }
@@ -429,85 +459,11 @@ class Lib {
     _all = null;
   }
 
-  // ---- Fast total: the whole list is streamed once and only counted (nothing is kept in memory) ----
+  // The total comes from the same single pass that builds the library (no second download).
   int? quick;
   Future<void>? quickF;
 
-  // Counts one request's stream_id/series_id keys without decoding or keeping the body.
-  Future<int?> _countUrl(String url, HttpClient hc) async {
-    final key = type == 'series' ? '"series_id"' : '"stream_id"';
-    final pat = key.codeUnits;
-    try {
-      final rq = await hc.getUrl(Uri.parse(url)).timeout(const Duration(seconds: 15));
-      ua.forEach((k, v) => rq.headers.set(k, v));
-      final rs = await rq.close().timeout(const Duration(seconds: 30));
-      if (rs.statusCode != 200) return null;
-      var n = 0;
-      var tail = <int>[];
-      await for (final chunk in rs.timeout(const Duration(seconds: 40))) {
-        final b = tail.isEmpty ? chunk : [...tail, ...chunk];
-        final last = b.length - pat.length;
-        for (var i = 0; i <= last; i++) {
-          if (b[i] != pat[0]) continue;
-          var j = 1;
-          while (j < pat.length && b[i + j] == pat[j]) {
-            j++;
-          }
-          if (j == pat.length) n++;
-        }
-        final keep = pat.length - 1;
-        tail = b.length > keep ? b.sublist(b.length - keep) : List<int>.of(b);
-      }
-      return n;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  // Many small per-category requests in parallel finish much sooner than one giant list.
-  Future<int?> _countAll() async {
-    final hc = HttpClient()..connectionTimeout = const Duration(seconds: 8);
-    try {
-      final ids = [for (final c in cats) '${c['category_id']}'];
-      if (ids.isEmpty) {
-        final n = await _countUrl(s.api(itemAction[type]!), hc);
-        return (n ?? 0) > 0 ? n : null;
-      }
-      var total = 0, bad = 0, next = 0;
-      Future<void> worker() async {
-        while (next < ids.length) {
-          final id = ids[next++];
-          final n = await _countUrl(s.api(itemAction[type]!, '&category_id=$id'), hc);
-          if (n == null) {
-            bad++;
-          } else {
-            total += n;
-          }
-        }
-      }
-      await Future.wait([for (var w = 0; w < 16; w++) worker()]);
-      if (bad > ids.length ~/ 4) {
-        final n = await _countUrl(s.api(itemAction[type]!), hc);
-        return (n ?? 0) > 0 ? n : null;
-      }
-      return total > 0 ? total : null;
-    } catch (_) {
-      return null;
-    } finally {
-      hc.close(force: true);
-    }
-  }
-
-  Future<void> quickCount() {
-    return quickF ??= () async {
-      final n = await _countAll();
-      if (n != null) {
-        quick = n;
-        Cfg.saveCount(type, n);
-        tick.value++;
-      }
-    }();
-  }
+  Future<void> quickCount() => start();
 
   Future<void> _run() async {
     final ep = _epoch;
@@ -566,21 +522,22 @@ class Lib {
     try {
       if (tmp != null && tmp.existsSync()) tmp.deleteSync();
     } catch (_) {}
-    // the total is fetched first; the heavy indexing starts after it (or after 20 s)
-    try {
-      await (quickF ?? Future<void>.value()).timeout(const Duration(seconds: 20));
-    } catch (_) {}
     final ids = [for (final c in cats) '${c['category_id']}'];
     var done = 0, next = 0;
     var bad = false;
+    var lastTick = DateTime.fromMillisecondsSinceEpoch(0);
     Future<void> wq = Future<void>.value();
     Future<void> worker() async {
       while (true) {
+        // wait while a detail page or the player is open
+        while (uiBusy > 0 && ep == _epoch) {
+          await Future<void>.delayed(const Duration(milliseconds: 400));
+        }
         final k = next++;
         if (k >= ids.length || ep != _epoch) return;
         try {
           final have = byCat[ids[k]];
-          final l = have ?? await _fetchCat(ids[k]);
+          final l = have ?? await _fetchShared(ids[k]);
           if (ep != _epoch) return;
           if (have == null) {
             byCat[ids[k]] = l;
@@ -598,12 +555,15 @@ class Lib {
         }
         done++;
         progress = done / ids.length;
-        tick.value++;
-        await Future<void>.delayed(const Duration(milliseconds: 40)); // keeps the screen smooth
+        final now = DateTime.now();
+        if (done >= ids.length || now.difference(lastTick).inMilliseconds > 350) {
+          lastTick = now;
+          tick.value++;
+        }
       }
     }
 
-    await Future.wait([for (var j = 0; j < 3; j++) worker()]);
+    await Future.wait([for (var j = 0; j < 12; j++) worker()]);
     try {
       await wq;
     } catch (_) {

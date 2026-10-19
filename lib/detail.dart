@@ -2,9 +2,7 @@ import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
 import 'core.dart';
 import 'fx.dart';
-import 'main.dart';
 import 'player.dart';
-import 'settings.dart';
 
 class _Ep {
   final String title, thumb, plot, dur, no;
@@ -40,13 +38,26 @@ class _DetailState extends State<DetailPage> {
   List<Map> tmdb = [];
   Map<String, String> art = {};
 
+  static final Map<String, Map> _cache = {};
+  String get _ck => '${widget.type}_${it.id}';
+  bool _busy = false;
+
   @override
   void initState() {
     super.initState();
+    uiBusy++; // background indexing waits while this page is open
+    _busy = true;
     init();
   }
 
+  @override
+  void dispose() {
+    if (_busy) uiBusy--;
+    super.dispose();
+  }
+
   void reload() {
+    _cache.remove(_ck);
     setState(() {
       loading = true;
       error = null;
@@ -56,10 +67,25 @@ class _DetailState extends State<DetailPage> {
     init();
   }
 
+  Future<Map> _fetchInfo() async {
+    for (var a = 0; a < 2; a++) {
+      try {
+        return await s.infoOf(isSeries ? 'get_series_info' : 'get_vod_info',
+            isSeries ? '&series_id=${it.id}' : '&vod_id=${it.id}');
+      } catch (_) {
+        if (a == 1) rethrow;
+      }
+    }
+    return {};
+  }
+
   Future<void> init() async {
     try {
-      final m = await s.infoOf(isSeries ? 'get_series_info' : 'get_vod_info',
-          isSeries ? '&series_id=${it.id}' : '&vod_id=${it.id}');
+      var m = _cache[_ck];
+      if (m == null) {
+        m = await _fetchInfo();
+        if (m.isNotEmpty) _cache[_ck] = m;
+      }
       info = m['info'] is Map ? m['info'] as Map : {};
       if (isSeries) {
         final e = m['episodes'];
@@ -81,6 +107,7 @@ class _DetailState extends State<DetailPage> {
         final md = m['movie_data'];
         if (md is Map) movieExt = clean(md['container_extension']);
       }
+      error = null;
     } catch (_) {
       error = 'Failed to load details.';
     }
@@ -127,6 +154,28 @@ class _DetailState extends State<DetailPage> {
     return n?.group(1) ?? '';
   }
 
+  String _p2(String x) => x.padLeft(2, '0');
+
+  // Full release date as dd-mm-yyyy (falls back to the year only when that is all there is)
+  String get relDate {
+    final d = pick(['releasedate', 'releaseDate', 'release_date']);
+    final a = RegExp(r'^(\d{4})-(\d{1,2})-(\d{1,2})').firstMatch(d);
+    if (a != null) return '${_p2(a.group(3)!)}-${_p2(a.group(2)!)}-${a.group(1)}';
+    final b = RegExp(r'^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})').firstMatch(d);
+    if (b != null) return '${_p2(b.group(1)!)}-${_p2(b.group(2)!)}-${b.group(3)}';
+    return year;
+  }
+
+  List<String> get genres {
+    final g = pick(['genre']);
+    return [
+      for (final x in g.split(RegExp(r'[,/|]')))
+        if (x.trim().isNotEmpty) x.trim()
+    ].take(4).toList();
+  }
+
+  String get catLabel => (isSeries ? s.series : s.movie).catName(it.cat).trim();
+
   String get duration {
     final d = pick(['duration']);
     if (d.isNotEmpty) return d;
@@ -153,7 +202,7 @@ class _DetailState extends State<DetailPage> {
           dur,
           n,
           Pi(t, s.seriesUrl('${e['id']}', xe),
-              s.seriesUrl('${e['id']}', xe == 'mp4' ? 'mkv' : 'mp4'))));
+              s.seriesUrl('${e['id']}', xe == 'mp4' ? 'mkv' : 'mp4'), '${e['id']}')));
     }
     return out;
   }
@@ -172,7 +221,9 @@ class _DetailState extends State<DetailPage> {
     } else {
       final ext = movieExt.isEmpty ? it.ext : movieExt;
       final ex = ext.isEmpty ? 'mp4' : ext;
-      watch([Pi(it.name, s.movieUrl(it.id, ex), s.movieUrl(it.id, ex == 'mp4' ? 'mkv' : 'mp4'))], 0);
+      watch([
+        Pi(it.name, s.movieUrl(it.id, ex), s.movieUrl(it.id, ex == 'mp4' ? 'mkv' : 'mp4'), it.id)
+      ], 0);
     }
   }
 
@@ -181,13 +232,7 @@ class _DetailState extends State<DetailPage> {
     if (mounted) setState(() => fav = now);
   }
 
-  String get playLabel {
-    if (!isSeries) return 'Play';
-    if (seasons.isEmpty) return 'Play S1 E1';
-    final k = seasons.keys.first;
-    final l = eps(k);
-    return 'Play S$k E${l.isEmpty ? 1 : l.first.no}';
-  }
+  String get playLabel => 'Watch Now';
 
   Widget castSection(String castNames) {
     final List<Map<String, String>> people = tmdb.isNotEmpty
@@ -367,32 +412,45 @@ class _DetailState extends State<DetailPage> {
     );
   }
 
+  Widget chip(String t) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+        decoration: BoxDecoration(
+            border: Border.all(color: Colors.white38), borderRadius: BorderRadius.circular(24)),
+        child: Text(t, style: const TextStyle(fontSize: 15)),
+      );
+
+  Widget storySection(String plot) {
+    if (plot.isEmpty) return const SizedBox.shrink();
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const SizedBox(height: 22),
+      const Text('Story', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 10),
+      Text(plot, style: const TextStyle(fontSize: 16, height: 1.4, color: Colors.white70)),
+    ]);
+  }
+
   @override
   Widget build(BuildContext c) {
     final poster = posterUrl;
     final castNames = pick(['cast', 'actors']);
     final plot = pick(['plot', 'description']);
+    final date = relDate;
     final meta = isSeries
-        ? [year, seasons.isEmpty ? '' : '${seasons.length} Seasons'].where((e) => e.isNotEmpty).join('·')
-        : [year, duration].where((e) => e.isNotEmpty).join('·');
+        ? [seasons.isEmpty ? '' : '${seasons.length} Seasons', date]
+            .where((e) => e.isNotEmpty)
+            .join('  ·  ')
+        : [duration, date].where((e) => e.isNotEmpty).join('  ·  ');
     final el = isSeries && season.isNotEmpty ? eps(season) : <_Ep>[];
+    final cat = catLabel;
+    final gl = genres;
     return Scaffold(
       body: SafeArea(
         child: Column(children: [
+          // top bar: only the back button
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
             child: Row(children: [
               rb(Icons.arrow_back, () => Navigator.pop(c)),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(it.name,
-                    maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 18)),
-              ),
-              rb(Icons.home, () => Navigator.popUntil(c, (r) => r.isFirst)),
-              rb(Icons.sync, reload),
-              rb(Icons.settings,
-                  () => Navigator.push(c, MaterialPageRoute(builder: (_) => const SettingsPage()))),
-              rb(Icons.logout, () => doLogout(c)),
             ]),
           ),
           Expanded(
@@ -400,69 +458,100 @@ class _DetailState extends State<DetailPage> {
               Positioned.fill(child: backdrop()),
               Positioned.fill(child: Container(color: Colors.black.withAlpha(110))),
               Positioned.fill(
-                child: loading
-                    ? const Center(child: CircularProgressIndicator())
-                    : SingleChildScrollView(
-                        padding: const EdgeInsets.fromLTRB(28, 22, 28, 28),
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(28, 18, 28, 28),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(14),
+                        child: SizedBox(
+                          width: 170,
+                          height: 255,
+                          child: PosterImg(poster, cacheW: 400),
+                        ),
+                      ),
+                      const SizedBox(width: 26),
+                      Expanded(
                         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(14),
-                              child: SizedBox(
-                                width: 150,
-                                height: 225,
-                                child: PosterImg(poster, cacheW: 340),
-                              ),
+                          if (cat.isNotEmpty)
+                            Text(cat.toUpperCase(),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 2,
+                                    color: Colors.white70)),
+                          const SizedBox(height: 6),
+                          Text(it.name,
+                              style: const TextStyle(fontSize: 30, fontWeight: FontWeight.bold)),
+                          if (meta.isNotEmpty) ...[
+                            const SizedBox(height: 10),
+                            Text(meta, style: const TextStyle(fontSize: 18, color: Colors.white70)),
+                          ],
+                          if (gl.isNotEmpty) ...[
+                            const SizedBox(height: 14),
+                            Wrap(spacing: 10, runSpacing: 8, children: [for (final g in gl) chip(g)]),
+                          ],
+                          if (castNames.isNotEmpty) ...[
+                            const SizedBox(height: 14),
+                            Text.rich(
+                              TextSpan(children: [
+                                const TextSpan(
+                                    text: 'Cast:  ',
+                                    style: TextStyle(fontWeight: FontWeight.bold)),
+                                TextSpan(text: castNames),
+                              ]),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 15),
                             ),
-                            const SizedBox(width: 26),
-                            Expanded(
-                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                Text(it.name,
-                                    style: const TextStyle(fontSize: 30, fontWeight: FontWeight.bold)),
-                                if (meta.isNotEmpty) ...[
-                                  const SizedBox(height: 10),
-                                  Text(meta, style: const TextStyle(fontSize: 17)),
-                                ],
-                                if (plot.isNotEmpty) ...[
-                                  const SizedBox(height: 10),
-                                  Text(plot,
-                                      maxLines: 5,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(fontSize: 16, height: 1.35)),
-                                ],
-                                if (error != null)
-                                  Padding(
-                                    padding: const EdgeInsets.only(top: 10),
-                                    child: Text(error!, style: const TextStyle(color: Colors.redAccent)),
-                                  ),
-                                const SizedBox(height: 16),
-                                Wrap(spacing: 12, runSpacing: 10, children: [
-                                  SizedBox(
-                                      width: 200,
-                                      child: GradBtn(playLabel, watchNow, icon: Icons.play_arrow)),
-                                  SizedBox(
-                                    width: 250,
-                                    child: GradBtn(fav ? 'Remove Favourite' : 'Add to Favourite', toggleFav,
-                                        outline: true, icon: Icons.favorite),
-                                  ),
-                                ]),
+                          ],
+                          // series: the story stays above the cast; movies show it below the cast
+                          if (isSeries && plot.isNotEmpty) ...[
+                            const SizedBox(height: 12),
+                            Text(plot,
+                                maxLines: 5,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 16, height: 1.35)),
+                          ],
+                          if (error != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 10),
+                              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                Text(error!, style: const TextStyle(color: Colors.redAccent)),
+                                TextButton(onPressed: reload, child: const Text('RETRY')),
                               ]),
                             ),
-                          ]),
-                          if (isSeries && seasons.isNotEmpty) ...[
-                            const SizedBox(height: 26),
-                            seasonTabs(),
-                            const Divider(color: Colors.white24, height: 1),
-                            const Padding(
-                              padding: EdgeInsets.fromLTRB(4, 22, 0, 8),
-                              child: Text('EPISODES',
-                                  style: TextStyle(fontSize: 18, letterSpacing: 0.5)),
+                          const SizedBox(height: 18),
+                          Wrap(spacing: 12, runSpacing: 10, children: [
+                            SizedBox(
+                                width: 200,
+                                child: GradBtn(playLabel, watchNow,
+                                    icon: Icons.play_arrow, busy: isSeries && loading)),
+                            SizedBox(
+                              width: 250,
+                              child: GradBtn(fav ? 'Remove Favourite' : 'Add to Favourite', toggleFav,
+                                  outline: true, icon: Icons.favorite),
                             ),
-                            for (var i = 0; i < el.length; i++) epRow(el, i),
-                          ],
-                          castSection(castNames),
+                          ]),
                         ]),
                       ),
+                    ]),
+                    if (isSeries && seasons.isNotEmpty) ...[
+                      const SizedBox(height: 26),
+                      seasonTabs(),
+                      const Divider(color: Colors.white24, height: 1),
+                      const Padding(
+                        padding: EdgeInsets.fromLTRB(4, 22, 0, 8),
+                        child: Text('EPISODES', style: TextStyle(fontSize: 18, letterSpacing: 0.5)),
+                      ),
+                      for (var i = 0; i < el.length; i++) epRow(el, i),
+                    ],
+                    castSection(castNames),
+                    if (!isSeries) storySection(plot),
+                  ]),
+                ),
               ),
             ]),
           ),

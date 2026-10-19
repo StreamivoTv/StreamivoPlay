@@ -614,14 +614,32 @@ class _BrowseState extends State<Browse> {
                           if (favs.containsKey(i.id))
                             const Positioned(
                                 top: 4,
-                                right: 4,
+                                left: 4,
                                 child: Icon(Icons.favorite, size: 18, color: Colors.pinkAccent)),
+                          if (i.rating > 0)
+                            Positioned(
+                              top: 4,
+                              right: 4,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                    color: Colors.black54, borderRadius: BorderRadius.circular(10)),
+                                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                  const Icon(Icons.star, size: 12, color: Colors.amber),
+                                  const SizedBox(width: 3),
+                                  Text(i.rating.toStringAsFixed(1),
+                                      style: const TextStyle(
+                                          fontSize: 11, fontWeight: FontWeight.bold)),
+                                ]),
+                              ),
+                            ),
                         ]),
                       ),
                       Padding(
                         padding: const EdgeInsets.all(6),
                         child: Text(i.name,
                             maxLines: 2,
+                            textAlign: TextAlign.center,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(fontSize: 12)),
                       ),

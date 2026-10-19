@@ -324,24 +324,23 @@ class _SetupState extends State<Setup> {
       await Future.wait([sess.live.loadCats(), sess.movie.loadCats(), sess.series.loadCats()]);
       done(2);
       go(3, 30, 'Loading data...');
-      // Live list + a fast count of movies and series. A returning user already has saved totals,
-      // so nothing is waited for; a new user waits only a few seconds. The heavy indexing of
-      // movies and series then runs quietly in the background.
-      final jobs = <Future<void>>[
-        sess.live.start(),
-        if (Cfg.counts['movie'] == null) sess.movie.quickCount(),
-        if (Cfg.counts['series'] == null) sess.series.quickCount(),
-      ];
+      // Live, movies and series are read in ONE parallel pass (12 requests at a time). A returning
+      // user has saved totals and the saved library, so nothing is waited for; a new user waits
+      // at most 5 seconds. Whatever is not finished then keeps loading quietly in the background.
+      final jobs = <Future<void>>[sess.live.start(), sess.movie.start(), sess.series.start()];
       var fin = false;
       Future.wait(jobs).whenComplete(() => fin = true);
-      final quickWait = (Cfg.counts['live'] != null && Cfg.counts['movie'] != null && Cfg.counts['series'] != null) ? 0 : 5;
+      final quickWait = (Cfg.counts['live'] != null &&
+              Cfg.counts['movie'] != null &&
+              Cfg.counts['series'] != null)
+          ? 0
+          : 5;
       final wait = Stopwatch()..start();
-      while (!fin && mounted && wait.elapsed.inSeconds < quickWait) {
-        await Future<void>.delayed(const Duration(milliseconds: 200));
-        go(3, 30 + 60 * (wait.elapsedMilliseconds / (quickWait * 1000)), 'Loading data...');
+      while (!fin && mounted && wait.elapsedMilliseconds < quickWait * 1000) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        final f = wait.elapsedMilliseconds / (quickWait * 1000);
+        go(3, 30 + 60 * (f > 1.0 ? 1.0 : f), 'Loading data...');
       }
-      sess.movie.start();
-      sess.series.start();
       done(3);
       go(4, 95, 'Almost ready...');
       done(4);
@@ -796,7 +795,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           if (l.full && l.total > 0) Cfg.saveCount(l.type, l.total);
           // Everything is loaded on the setup screen, so the dashboard shows the final total at once
           final saved = Cfg.counts[l.type] ?? 0;
-          final n = l.full ? l.total : (l.quick ?? saved);
+          final n = l.full ? l.total : (l.total > saved ? l.total : saved);
           final txt = n > 0 ? '$n $unit' : unit;
           return Text(txt, style: const TextStyle(color: Colors.white60, fontSize: 16));
         },
