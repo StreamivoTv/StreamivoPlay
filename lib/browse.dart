@@ -282,11 +282,31 @@ class _BrowseState extends State<Browse> {
       await stopPreview();
     }
     if (!mounted) return;
-    final builtin = await playItems(context, s, list, idx, true, initial: carry, onIndex: (n) {
+    liveHandBack = null;
+    final builtin = await playItems(context, s, list, idx, true, initial: carry, keepAlive: true,
+        onIndex: (n) {
       sel = src[n];
       addRecent(src[n]);
     });
-    if (mounted && builtin && sel != null) startPreview(sel!);
+    // The player gives the running stream back: the preview stays exactly as it was (no reload)
+    // the player closes a moment after its route pops: wait (up to 1.5 s) for the stream
+    for (var w = 0; w < 30 && liveHandBack == null && mounted; w++) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    final back = liveHandBack;
+    liveHandBack = null;
+    if (mounted && builtin && back != null && sel != null) {
+      pgen++;
+      setState(() {
+        pv = back;
+        pLoading = false;
+        pErr = null;
+      });
+      back.play();
+    } else {
+      back?.dispose();
+      if (mounted && builtin && sel != null) startPreview(sel!);
+    }
   }
 
   Future<void> openDetail(It i) async {

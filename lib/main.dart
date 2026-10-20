@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fvp/fvp.dart' as fvp;
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'account.dart';
 import 'browse.dart';
 import 'core.dart';
@@ -12,6 +13,10 @@ import 'settings.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // the screen stays on the whole time the app is open (it only turns off when the user locks it)
+  try {
+    WakelockPlus.enable();
+  } catch (_) {}
   // FFmpeg-based engine under video_player: plays AC3 / EAC3 / MP2 / DTS audio that the
   // phone's own decoder cannot (the cause of channels with picture but no sound)
   try {
@@ -19,6 +24,7 @@ Future<void> main() async {
       'platforms': ['android'],
       'video.decoders': ['AMediaCodec', 'FFmpeg', 'dav1d'],
       'audio.decoders': ['FFmpeg'],
+      'player': {'avformat.probesize': '2000000', 'avformat.analyzeduration': '2000000'},
     });
   } catch (_) {}
   ErrorWidget.builder = (d) => Material(
@@ -60,7 +66,10 @@ class _BootState extends State<Boot> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState st) {
-    if (st == AppLifecycleState.resumed) hideBars();
+    if (st == AppLifecycleState.resumed) {
+      hideBars();
+      WakelockPlus.enable();
+    }
   }
 
   Future<void> init() async {
@@ -774,7 +783,10 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState st) {
-    if (st == AppLifecycleState.resumed) syncAll();
+    if (st == AppLifecycleState.resumed) {
+      WakelockPlus.enable();
+      syncAll();
+    }
   }
 
   void syncAll() {

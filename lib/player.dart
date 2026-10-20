@@ -21,6 +21,8 @@ void _applyDecoder(String m) {
       'platforms': ['android'],
       'video.decoders': _decList(m),
       'audio.decoders': ['FFmpeg'],
+      // look at less of the stream before starting playback (faster start)
+      'player': {'avformat.probesize': '2000000', 'avformat.analyzeduration': '2000000'},
     });
     _appliedDec = m;
   } catch (_) {}
@@ -29,7 +31,7 @@ void _applyDecoder(String m) {
 // Opens the built-in player, or an external app when selected in Settings.
 // Returns true when the built-in player was used.
 Future<bool> playItems(BuildContext c, Session s, List<Pi> list, int idx, bool live,
-    {ValueChanged<int>? onIndex, VideoPlayerController? initial, String kind = ''}) async {
+    {ValueChanged<int>? onIndex, VideoPlayerController? initial, String kind = '', bool keepAlive = false}) async {
   final kd = kind.isEmpty ? (live ? 'live' : 'movie') : kind;
   if (Cfg.gs('pl_$kd', Cfg.playerMode) == 'external') {
     final pi = list[idx];
@@ -47,9 +49,13 @@ Future<bool> playItems(BuildContext c, Session s, List<Pi> list, int idx, bool l
   await Navigator.push(
       c,
       MaterialPageRoute(
-          builder: (_) => Player(s, list, idx, live, onIndex: onIndex, initial: initial, kind: kd)));
+          builder: (_) => Player(s, list, idx, live,
+              onIndex: onIndex, initial: initial, kind: kd, keepAlive: keepAlive)));
   return true;
 }
+
+// Stream handed back by the player to the screen that opened it (see Player.keepAlive)
+VideoPlayerController? liveHandBack;
 
 class Player extends StatefulWidget {
   final Session s;
@@ -59,8 +65,11 @@ class Player extends StatefulWidget {
   final String kind;
   final ValueChanged<int>? onIndex;
   final VideoPlayerController? initial;
+  // true: when the player closes, the running stream is given back to the list screen
+  // (through liveHandBack) instead of being closed, so the list does not reload it
+  final bool keepAlive;
   const Player(this.s, this.items, this.index, this.live,
-      {this.onIndex, this.initial, this.kind = '', super.key});
+      {this.onIndex, this.initial, this.kind = '', this.keepAlive = false, super.key});
   @override
   State<Player> createState() => _PlayerState();
 }
@@ -79,7 +88,7 @@ class _PlayerState extends State<Player> {
   String? osd, pill;
   IconData osdIcon = Icons.info;
   double volume = 0.5, bright = 0.5, accum = 0, speed = 1.0;
-  int dragMode = 0; // 1 = volume (left side), 2 = brightness (right side)
+  int dragMode = 0; // 1 = volume (right side), 2 = brightness (left side)
   bool hOn = false;
   double hdx = 0;
   Duration hBase = Duration.zero;
@@ -150,8 +159,14 @@ class _PlayerState extends State<Player> {
     osdT?.cancel();
     pillT?.cancel();
     speedT?.cancel();
-    vc?.dispose();
-    WakelockPlus.disable();
+    final lv = vc;
+    if (widget.keepAlive && lv != null && lv.value.isInitialized && !lv.value.hasError && err == null) {
+      lv.removeListener(onVc);
+      liveHandBack = lv;
+    } else {
+      lv?.dispose();
+    }
+    WakelockPlus.enable(); // keep the screen on after the player closes too
     nat('resetBrightness');
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     if (_appliedDec != 'auto') {
@@ -279,7 +294,7 @@ class _PlayerState extends State<Player> {
     final c = VideoPlayerController.networkUrl(Uri.parse(real),
         httpHeaders: attempt == 1 ? const <String, String>{} : ua);
     try {
-      await c.initialize().timeout(const Duration(seconds: 40));
+      await c.initialize().timeout(const Duration(seconds: 25));
       if (!mounted || my != gen) {
         await c.dispose();
         return;
@@ -350,7 +365,19 @@ class _PlayerState extends State<Player> {
 
   void toggle() {
     final v = vc;
-    if (v == null) return;
+    if (v == null) {
+      // the play button also works while the stream is still opening: after an error, or when
+      // opening is taking long, it starts the stream again; otherwise it just says so
+      final waited = DateTime.now().difference(loadStart).inSeconds;
+      if (err != null || waited >= 6) {
+        showPill('Starting...');
+        play(cur.url, cur.alt);
+      } else {
+        showPill('Starting, please wait...');
+      }
+      poke();
+      return;
+    }
     v.value.isPlaying ? v.pause() : v.play();
     poke();
   }
@@ -609,7 +636,7 @@ class _PlayerState extends State<Player> {
 
   // ---- touch gestures ----
   void vStart(DragStartDetails d, double w) {
-    dragMode = d.localPosition.dx < w / 2 ? 1 : 2;
+    dragMode = d.localPosition.dx < w / 2 ? 2 : 1;
     accum = dragMode == 1 ? volume : bright;
   }
 

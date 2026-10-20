@@ -104,15 +104,15 @@ int resolvedSize = 0;
 // Follows redirects by hand (the video engine refuses http -> https redirects)
 Future<String> resolveFinal(String url) async {
   resolvedSize = 0;
-  final hc = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+  final hc = HttpClient()..connectionTimeout = const Duration(seconds: 4);
   try {
     var u = Uri.parse(url);
     for (var i = 0; i < 6; i++) {
-      final rq = await hc.getUrl(u).timeout(const Duration(seconds: 8));
+      final rq = await hc.getUrl(u).timeout(const Duration(seconds: 4));
       rq.followRedirects = false;
       ua.forEach((k, v) => rq.headers.set(k, v));
       rq.headers.set('Range', 'bytes=0-0');
-      final rs = await rq.close().timeout(const Duration(seconds: 10));
+      final rs = await rq.close().timeout(const Duration(seconds: 5));
       final loc = rs.headers.value('location');
       if (rs.statusCode >= 300 && rs.statusCode < 400 && loc != null) {
         u = u.resolve(loc);
@@ -1032,10 +1032,8 @@ Future<List<Map>> tmdbCast(String kind, String id) async {
 }
 
 // ---------------- Shared widgets ----------------
-Widget logoImg(double s) => ClipRRect(
-      borderRadius: BorderRadius.circular(s * 0.26),
-      child: Image.asset('assets/logo.png', width: s, height: s),
-    );
+Widget logoImg(double s) => Image.asset('assets/logo_clean.png',
+    width: s, height: s * 763 / 1039, fit: BoxFit.contain, filterQuality: FilterQuality.high);
 
 Widget rb(IconData i, VoidCallback f, {bool on = false}) => Padding(
       padding: const EdgeInsets.only(left: 6),
