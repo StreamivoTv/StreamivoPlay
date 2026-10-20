@@ -185,7 +185,7 @@ class StreamivoApp extends StatelessWidget {
   const StreamivoApp({super.key});
   @override
   Widget build(BuildContext c) => MaterialApp(
-        title: 'STREAMIVOTV',
+        title: 'Stream TV',
         debugShowCheckedModeBanner: false,
         builder: (ctx, child) => ValueListenableBuilder<int>(
           valueListenable: uiTick,
