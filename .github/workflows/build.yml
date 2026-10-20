@@ -47,7 +47,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: STREAMIVOTV
+          name: STREAM TV
           path: STREAMIVOTV.apk
 
       # Fixed download link: Releases > latest > STREAMIVOTV.apk (plain APK, no zip)
@@ -56,4 +56,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest STREAMIVOTV.apk --title "STREAMIVOTV" --notes "Latest STREAMIVOTV.apk" --latest
+          gh release create latest STREAMIVOTV.apk --title "STREAM TV" --notes "Latest STREAMIVOTV.apk" --latest
