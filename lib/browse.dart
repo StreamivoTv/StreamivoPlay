@@ -418,7 +418,7 @@ class _BrowseState extends State<Browse> {
               sortAz = !sortAz;
               recompute();
             }, on: sortAz),
-            rb(Icons.refresh, () => load(force: true)),
+            rb(Icons.refresh, () => reloadLibrary(context, s)),
             rb(Icons.settings,
                 () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsPage()))),
             rb(Icons.logout, () => doLogout(context)),

@@ -362,6 +362,17 @@ class Lib {
   bool full = false, failed = false;
   String err = ''; // short reason of the last failure (shown on the dashboard)
   double progress = 0;
+  int partial = 0; // items counted so far while the list is still downloading
+  DateTime _pt = DateTime.fromMillisecondsSinceEpoch(0);
+  void _onItems(int n) {
+    partial = n;
+    final now = DateTime.now();
+    if (now.difference(_pt).inMilliseconds > 300) {
+      _pt = now;
+      tick.value++;
+    }
+  }
+
   final ValueNotifier<int> tick = ValueNotifier<int>(0);
   Future<void>? _job;
   List<It>? _all;
@@ -424,24 +435,13 @@ class Lib {
     return _pend[id] ??= _fetchCat(id).whenComplete(() => _pend.remove(id));
   }
 
-  // Only ONE big library download runs at a time (they used to share the connection and all
-  // finished late, and starved the video stream of bandwidth)
-  static Future<void> _gate = Future<void>.value();
-  static Future<T> _serial<T>(Future<T> Function() f) {
-    final c = Completer<T>();
-    _gate = _gate.catchError((_) {}).then((_) async {
-      try {
-        c.complete(await f());
-      } catch (e, st) {
-        c.completeError(e, st);
-      }
-    });
-    return c.future;
-  }
+  // Live, movies and series download at the same time (the server builds the three big lists
+  // in parallel, so all counts arrive sooner). Kept as a wrapper in one place.
+  static Future<T> _serial<T>(Future<T> Function() f) => f();
 
-  Future<void> start({bool force = false}) {
+  Future<void> start({bool force = false, bool hard = false}) {
     // Refresh with content already on screen: keep showing it and update quietly in the background
-    if (force && full && byCat.isNotEmpty) return refreshBg(force: true);
+    if (force && !hard && full && byCat.isNotEmpty) return refreshBg(force: true);
     if (force) {
       _epoch++;
       _job = null;
@@ -450,6 +450,7 @@ class Lib {
       full = false;
       failed = false;
       progress = 0;
+      partial = 0;
       _all = null;
       _lastSync = null;
       _syncing = false;
@@ -523,7 +524,7 @@ class Lib {
         final l = await _serial(() => s.fetchStream(itemAction['live']!, '', type, (n, tot) {
               final p = tot > 0 ? n / tot : n / (n + 3000000.0);
               progress = p > 0.95 ? 0.95 : p;
-            }));
+            }, onItems: _onItems));
         if (ep != _epoch) return;
         byCat.clear();
         _group(l);
@@ -591,7 +592,7 @@ class Lib {
           lastT = now;
           tick.value++;
         }
-      }));
+      }, onItems: _onItems));
       if (ep != _epoch) return;
       if (all.isNotEmpty) {
         byCat.clear(); // categories opened earlier were fetched on their own: avoid duplicates
@@ -887,7 +888,29 @@ class Session {
   // Whole list in one request, read as a stream: the timeout is for silence (no data for
   // 30 s), not for the total time, and onProgress reports the bytes received so far.
   Future<List<It>> fetchStream(String action, String extra, String type,
-      void Function(int bytes, int total) onProgress) async {
+      void Function(int bytes, int total) onProgress,
+      {void Function(int items)? onItems}) async {
+    // counts the items while the bytes arrive, so the dashboard can show a growing number
+    final pat = utf8.encode('"${type == 'series' ? 'series_id' : 'stream_id'}"');
+    var cnt = 0;
+    var tail = <int>[];
+    void scan(List<int> ch) {
+      final data = tail.isEmpty ? ch : <int>[...tail, ...ch];
+      for (var i = 0; i + pat.length <= data.length; i++) {
+        if (data[i] != pat[0]) continue;
+        var j = 1;
+        while (j < pat.length && data[i + j] == pat[j]) {
+          j++;
+        }
+        if (j == pat.length) {
+          cnt++;
+          i += pat.length - 1;
+        }
+      }
+      tail = data.sublist(data.length > pat.length - 1 ? data.length - (pat.length - 1) : 0);
+      onItems?.call(cnt);
+    }
+
     final cl = http.Client();
     try {
       final rq = http.Request('GET', Uri.parse(api(action, extra)));
@@ -899,6 +922,7 @@ class Session {
       await for (final ch in rs.stream.timeout(const Duration(seconds: 30))) {
         buf.add(ch);
         n += ch.length;
+        if (onItems != null) scan(ch);
         onProgress(n, rs.contentLength ?? 0);
         // a video is starting / playing: stop reading so all the bandwidth goes to the video
         while (uiBusy > 0) {

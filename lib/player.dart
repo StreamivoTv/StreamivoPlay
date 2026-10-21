@@ -25,7 +25,7 @@ void _applyDecoder(String m) {
       'video.decoders': _decList(m),
       'audio.decoders': ['FFmpeg'],
       // look at less of the stream before starting playback (faster start)
-      'player': {'avformat.probesize': '1000000', 'avformat.analyzeduration': '1000000'},
+      'player': {'avformat.probesize': '2000000', 'avformat.analyzeduration': '2000000'},
     });
     _appliedDec = m;
   } catch (_) {}
@@ -373,9 +373,8 @@ class _PlayerState extends State<Player> {
     if (v == null) {
       // the play button also works while the stream is still opening: after an error, or when
       // opening is taking long, it starts the stream again; otherwise it just says so
-      // (no "please wait" message any more: it just retries quietly when needed)
-      final waited = DateTime.now().difference(loadStart).inSeconds;
-      if (err != null || waited >= 6) play(cur.url, cur.alt);
+      // the button always works: while the stream is still opening it starts it again at once
+      play(cur.url, cur.alt);
       poke();
       return;
     }
@@ -851,7 +850,7 @@ class _PlayerState extends State<Player> {
     final size = v?.value.size;
     final live = widget.live;
     final playing = v?.value.isPlaying == true;
-    final now = epg.isNotEmpty && epg[0].isNotEmpty ? epg[0] : 'No Program Found';
+    final playing = v?.value.isPlaying == true || (v == null && loading && err == null);
     final next = epg.length > 1 && epg[1].isNotEmpty ? epg[1] : 'No Program Found';
     final pos = v?.value.position ?? Duration.zero;
     final dur = v?.value.duration ?? Duration.zero;

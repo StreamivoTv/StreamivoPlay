@@ -167,6 +167,15 @@ Widget _dlgBtn(String t, Color fill, Color line, Color text, VoidCallback f, {bo
     );
 
 // Opens the dashboard (and the Live screen first if that is the chosen start screen)
+// Refresh = load everything again on the "Setting up your library" screen, then back to the dashboard
+void reloadLibrary(BuildContext c, Session s) {
+  for (final l in [s.live, s.movie, s.series]) {
+    l.start(force: true, hard: true);
+  }
+  Navigator.of(c).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => Setup(session: s, fresh: true)), (r) => false);
+}
+
 void openHome(NavigatorState nav, Session s) {
   nav.pushReplacement(MaterialPageRoute(builder: (_) => Home(s)));
   if (Cfg.startScreen == 'live') {
@@ -263,7 +272,8 @@ class _SplashState extends State<Splash> {
 class Setup extends StatefulWidget {
   final Session? session;
   final String? user, pass;
-  const Setup({this.session, this.user, this.pass, super.key});
+  final bool fresh; // true after a refresh: wait here until everything is loaded again
+  const Setup({this.session, this.user, this.pass, this.fresh = false, super.key});
   @override
   State<Setup> createState() => _SetupState();
 }
@@ -335,12 +345,14 @@ class _SetupState extends State<Setup> {
       var fin = false;
       Future.wait(jobs).whenComplete(() => fin = true);
       // Returning users already have saved totals + saved library, so they go straight in.
-      // A new user waits here until live, movies and series are all counted (max 10 s),
+      // A new user waits here until live, movies and series are all counted (max 40 s),
       // so the dashboard normally shows every number at once.
       final saved = Cfg.counts['live'] != null &&
           Cfg.counts['movie'] != null &&
           Cfg.counts['series'] != null;
-      final maxMs = saved ? 0 : 10000; // new user: at most 10 s, then the dashboard opens and counts fill in
+      // First time and after a refresh: stay on this screen until live, movies and series are all counted,
+      // so the dashboard opens with the final totals (max 90 s). Returning users go straight in.
+      final maxMs = (saved && !widget.fresh) ? 0 : 90000; // new user: wait here (progress is shown) until all three counts are ready, at most 40 s
       final wait = Stopwatch()..start();
       while (!fin && mounted && wait.elapsedMilliseconds < maxMs) {
         await Future<void>.delayed(const Duration(milliseconds: 100));
@@ -819,8 +831,11 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           if (l.full && l.total > 0) Cfg.saveCount(l.type, l.total);
           // Everything is loaded on the setup screen, so the dashboard shows the final total at once
           final saved = Cfg.counts[l.type] ?? 0;
-          final n = l.full ? l.total : (l.total > saved ? l.total : saved);
-          final txt = n > 0 ? '$n $unit' : (l.failed ? (l.err.isEmpty ? '$unit - tap refresh' : 'Failed: ${l.err}') : 'Loading...');
+          var n = l.full ? l.total : (l.total > saved ? l.total : saved);
+          if (!l.full && l.partial > n) n = l.partial; // grows while the list downloads
+          final txt = n > 0
+              ? '$n $unit'
+              : (l.failed ? (l.err.isEmpty ? '$unit - tap refresh' : 'Failed: ${l.err}') : '0 $unit');
           return Text(txt,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
@@ -867,7 +882,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
                   ]),
                 ),
                 InkResponse(
-                  onTap: () => l.start(force: true),
+                  onTap: () => reloadLibrary(context, s),
                   child: Icon(Icons.refresh, size: 20, color: col),
                 ),
               ]),
