@@ -90,7 +90,7 @@ class _PlayerState extends State<Player> {
   static const sizeFits = [BoxFit.contain, BoxFit.fitWidth, BoxFit.fitHeight, BoxFit.fill];
   String? osd, pill;
   IconData osdIcon = Icons.info;
-  int vol30 = 10, bri30 = 20; // FileX style 0-30 scales
+  int vol30 = 15, bri30 = 20; // volume starts at normal (15); // FileX style 0-30 scales
   double gain = 1.0, accum = 0, speed = 1.0;
   bool osdLvl = false;
   Color osdCol = const Color(0xFFD81B4A);
@@ -132,9 +132,6 @@ class _PlayerState extends State<Player> {
     inPip.addListener(onPip);
     WakelockPlus.enable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    nat('getVolume').then((v) {
-      if (v is double) vol30 = (v * 15).round().clamp(0, 15).toInt();
-    });
     nat('getBrightness').then((v) {
       if (v is double) bri30 = (math.pow(v.clamp(0.0, 1.0), 1 / 0.6) * 30).round().clamp(0, 30).toInt();
     });
@@ -391,7 +388,7 @@ class _PlayerState extends State<Player> {
     final g = muted ? 0.0 : gain;
     try {
       if (g > 1.0) {
-        VideoPlayerPlatform.instance.setVolume(c.textureId, g).catchError((_) {});
+        VideoPlayerPlatform.instance.setVolume(c.playerId, g).catchError((_) {});
       } else {
         c.setVolume(g);
       }
@@ -426,9 +423,12 @@ class _PlayerState extends State<Player> {
 
   void setVol(int l) {
     vol30 = l.clamp(0, 30).toInt();
-    // 0-15: phone volume; 16-30: phone stays at maximum and the player adds gain
-    nat('setVolume', (vol30 / 15.0).clamp(0.0, 1.0));
-    gain = vol30 <= 15 ? 1.0 : 1.0 + (vol30 - 15) * 0.08;
+    // FileX style: the phone volume goes to maximum and the number 0-30 is the player volume:
+    // 5 = a little below normal, 15 = normal, 30 = about 3x louder
+    nat('setVolume', vol30 == 0 ? 0.0 : 1.0);
+    gain = vol30 == 0
+        ? 0.0
+        : (vol30 <= 15 ? 0.6 + 0.4 * (vol30 / 15.0) : 1.0 + (vol30 - 15) * 0.13);
     muted = false;
     final c = vc;
     if (c != null) applyGain(c);
