@@ -849,8 +849,8 @@ class _PlayerState extends State<Player> {
   Widget overlay(VideoPlayerController? v, double w, double k) {
     final size = v?.value.size;
     final live = widget.live;
-    final playing = v?.value.isPlaying == true;
     final playing = v?.value.isPlaying == true || (v == null && loading && err == null);
+    final now = epg.isNotEmpty && epg[0].isNotEmpty ? epg[0] : 'No Program Found';
     final next = epg.length > 1 && epg[1].isNotEmpty ? epg[1] : 'No Program Found';
     final pos = v?.value.position ?? Duration.zero;
     final dur = v?.value.duration ?? Duration.zero;
