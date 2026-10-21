@@ -51,6 +51,7 @@ class _BrowseState extends State<Browse> {
   @override
   void dispose() {
     pgen++;
+    _hold(false);
     pv?.dispose();
     deb?.cancel();
     sc.dispose();
@@ -68,14 +69,24 @@ class _BrowseState extends State<Browse> {
   }
 
   Future<void> load({bool force = false}) async {
-    setState(() {
-      loading = true;
-      error = null;
-    });
+    final quiet = force && lib.full && lib.total > 0;
+    if (!quiet) {
+      setState(() {
+        loading = true;
+        error = null;
+      });
+    }
     try {
       if (force) {
         final job = lib.start(force: true);
-        if (live) await job;
+        if (quiet) {
+          // content stays on screen at once; new items appear by themselves when ready
+          job.then((_) {
+            if (mounted && catId.isNotEmpty && q.isEmpty) select(catId);
+          });
+        } else if (live) {
+          await job;
+        }
       }
       if (lib.cats.isEmpty) await lib.loadCats();
       if (live) {
@@ -200,6 +211,7 @@ class _BrowseState extends State<Browse> {
   // ---- live preview ----
   Future<void> stopPreview() async {
     pgen++;
+    _hold(false);
     final o = pv;
     if (mounted) {
       setState(() {
@@ -210,8 +222,26 @@ class _BrowseState extends State<Browse> {
     await disposeLater(o);
   }
 
+  bool _pb = false;
+  void _hold(bool on) {
+    if (on && !_pb) {
+      uiBusy++;
+      _pb = true;
+    } else if (!on && _pb) {
+      uiBusy--;
+      _pb = false;
+    }
+  }
+
+  void _releaseLater(int my) {
+    Future<void>.delayed(const Duration(seconds: 8), () {
+      if (my == pgen) _hold(false);
+    });
+  }
+
   Future<void> startPreview(It i, {bool second = false}) async {
     final my = ++pgen;
+    _hold(true);
     final old = pv;
     setState(() {
       pv = null;
@@ -225,6 +255,7 @@ class _BrowseState extends State<Browse> {
     if (url == null) {
       setState(() {
         pLoading = false;
+        _hold(false);
         pErr = 'Unable to play this channel. Try another one.';
       });
       return;
@@ -236,11 +267,13 @@ class _BrowseState extends State<Browse> {
         await c.dispose();
         return;
       }
-      await c.play();
+      // picture shows as soon as it is ready
       setState(() {
         pv = c;
         pLoading = false;
       });
+      unawaited(c.play());
+      _releaseLater(my);
     } catch (_) {
       await c.dispose();
       if (!mounted || my != pgen) return;
@@ -249,7 +282,8 @@ class _BrowseState extends State<Browse> {
       } else {
         setState(() {
           pLoading = false;
-          pErr = 'Unable to play this channel. Try another one.';
+          _hold(false);
+        pErr = 'Unable to play this channel. Try another one.';
         });
       }
     }
@@ -263,6 +297,7 @@ class _BrowseState extends State<Browse> {
   }
 
   Future<void> fullscreen() async {
+    _hold(false); // the full screen player holds the downloads itself
     final cur = sel;
     if (cur == null) return;
     var idx = shown.indexWhere((x) => x.id == cur.id);

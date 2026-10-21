@@ -104,15 +104,15 @@ int resolvedSize = 0;
 // Follows redirects by hand (the video engine refuses http -> https redirects)
 Future<String> resolveFinal(String url) async {
   resolvedSize = 0;
-  final hc = HttpClient()..connectionTimeout = const Duration(seconds: 4);
+  final hc = HttpClient()..connectionTimeout = const Duration(seconds: 3);
   try {
     var u = Uri.parse(url);
     for (var i = 0; i < 6; i++) {
-      final rq = await hc.getUrl(u).timeout(const Duration(seconds: 4));
+      final rq = await hc.getUrl(u).timeout(const Duration(seconds: 3));
       rq.followRedirects = false;
       ua.forEach((k, v) => rq.headers.set(k, v));
       rq.headers.set('Range', 'bytes=0-0');
-      final rs = await rq.close().timeout(const Duration(seconds: 5));
+      final rs = await rq.close().timeout(const Duration(seconds: 3));
       final loc = rs.headers.value('location');
       if (rs.statusCode >= 300 && rs.statusCode < 400 && loc != null) {
         u = u.resolve(loc);
@@ -424,7 +424,24 @@ class Lib {
     return _pend[id] ??= _fetchCat(id).whenComplete(() => _pend.remove(id));
   }
 
+  // Only ONE big library download runs at a time (they used to share the connection and all
+  // finished late, and starved the video stream of bandwidth)
+  static Future<void> _gate = Future<void>.value();
+  static Future<T> _serial<T>(Future<T> Function() f) {
+    final c = Completer<T>();
+    _gate = _gate.catchError((_) {}).then((_) async {
+      try {
+        c.complete(await f());
+      } catch (e, st) {
+        c.completeError(e, st);
+      }
+    });
+    return c.future;
+  }
+
   Future<void> start({bool force = false}) {
+    // Refresh with content already on screen: keep showing it and update quietly in the background
+    if (force && full && byCat.isNotEmpty) return refreshBg(force: true);
     if (force) {
       _epoch++;
       _job = null;
@@ -483,13 +500,40 @@ class Lib {
     failed = false;
     try {
       if (type == 'live') {
+        final catsF = cats.isEmpty ? loadCats().catchError((_) {}) : Future<void>.value();
+        // Saved channel list: Live TV opens at once, changes are checked in the background
+        final path = await _path();
+        final f = path == null ? null : File(path);
+        if (path != null && f != null && f.existsSync()) {
+          final c = await compute(readCache, path);
+          if (ep != _epoch) return;
+          if (c.isNotEmpty) {
+            _group(c);
+            await catsF;
+            full = true;
+            progress = 1;
+            _lastSync = f.statSync().modified;
+            tick.value++;
+            if (Cfg.gb('auto_content', true)) refreshBg();
+            return;
+          }
+        }
+        await catsF;
         if (cats.isEmpty) await loadCats();
-        final l = await s.fetchItems(itemAction['live']!, '', type, 120);
+        final l = await _serial(() => s.fetchStream(itemAction['live']!, '', type, (n, tot) {
+              final p = tot > 0 ? n / tot : n / (n + 3000000.0);
+              progress = p > 0.95 ? 0.95 : p;
+            }));
         if (ep != _epoch) return;
+        byCat.clear();
         _group(l);
         full = true;
         progress = 1;
         _lastSync = DateTime.now();
+        tick.value++;
+        try {
+          await _saveCache();
+        } catch (_) {}
       } else {
         await _runCats(ep);
       }
@@ -538,7 +582,7 @@ class Lib {
     // one request per category; falls back to the per-category way if the server refuses.
     try {
       var lastT = DateTime.fromMillisecondsSinceEpoch(0);
-      final all = await s.fetchStream(itemAction[type]!, '', type, (n, tot) {
+      final all = await _serial(() => s.fetchStream(itemAction[type]!, '', type, (n, tot) {
         // real percent when the server tells the size, otherwise a smooth estimate
         final p = tot > 0 ? n / tot : n / (n + 6000000.0);
         progress = p > 0.95 ? 0.95 : p;
@@ -547,9 +591,10 @@ class Lib {
           lastT = now;
           tick.value++;
         }
-      });
+      }));
       if (ep != _epoch) return;
       if (all.isNotEmpty) {
+        byCat.clear(); // categories opened earlier were fetched on their own: avoid duplicates
         _group(all);
         await catsF;
         full = true;
@@ -688,7 +733,7 @@ class Lib {
       ];
       if (ep != _epoch) return;
       if (type == 'live') {
-        final l = await s.fetchItems(itemAction['live']!, '', type, 120);
+        final l = await s.fetchStream(itemAction['live']!, '', type, (_, __) {});
         if (ep != _epoch || l.isEmpty) return;
         final nm = <String, List<It>>{};
         for (final i in l) {
@@ -752,8 +797,8 @@ class Lib {
       if (changed) {
         _all = null;
         tick.value++;
-        if (type != 'live') await _saveCache();
-      } else if (type != 'live') {
+        await _saveCache();
+      } else {
         final path = await _path();
         if (path != null && File(path).existsSync()) File(path).setLastModifiedSync(DateTime.now());
       }
@@ -855,6 +900,10 @@ class Session {
         buf.add(ch);
         n += ch.length;
         onProgress(n, rs.contentLength ?? 0);
+        // a video is starting / playing: stop reading so all the bandwidth goes to the video
+        while (uiBusy > 0) {
+          await Future<void>.delayed(const Duration(milliseconds: 150));
+        }
       }
       return await compute(parseBytes, <dynamic>[buf.takeBytes(), type]);
     } finally {

@@ -2,7 +2,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fvp/fvp.dart' as fvp;
+import 'dart:math' as math;
 import 'package:video_player/video_player.dart';
+import 'package:video_player_platform_interface/video_player_platform_interface.dart'
+    show VideoPlayerPlatform;
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'core.dart';
 
@@ -22,7 +25,7 @@ void _applyDecoder(String m) {
       'video.decoders': _decList(m),
       'audio.decoders': ['FFmpeg'],
       // look at less of the stream before starting playback (faster start)
-      'player': {'avformat.probesize': '2000000', 'avformat.analyzeduration': '2000000'},
+      'player': {'avformat.probesize': '1000000', 'avformat.analyzeduration': '1000000'},
     });
     _appliedDec = m;
   } catch (_) {}
@@ -87,7 +90,10 @@ class _PlayerState extends State<Player> {
   static const sizeFits = [BoxFit.contain, BoxFit.fitWidth, BoxFit.fitHeight, BoxFit.fill];
   String? osd, pill;
   IconData osdIcon = Icons.info;
-  double volume = 0.5, bright = 0.5, accum = 0, speed = 1.0;
+  int vol30 = 10, bri30 = 20; // FileX style 0-30 scales
+  double gain = 1.0, accum = 0, speed = 1.0;
+  bool osdLvl = false;
+  Color osdCol = const Color(0xFFD81B4A);
   int dragMode = 0; // 1 = volume (right side), 2 = brightness (left side)
   bool hOn = false;
   double hdx = 0;
@@ -127,10 +133,10 @@ class _PlayerState extends State<Player> {
     WakelockPlus.enable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     nat('getVolume').then((v) {
-      if (v is double) volume = v;
+      if (v is double) vol30 = (v * 15).round().clamp(0, 15).toInt();
     });
     nat('getBrightness').then((v) {
-      if (v is double) bright = v;
+      if (v is double) bri30 = (math.pow(v.clamp(0.0, 1.0), 1 / 0.6) * 30).round().clamp(0, 30).toInt();
     });
     speedT = Timer.periodic(const Duration(seconds: 1), (_) => sampleSpeed());
     loadEpg();
@@ -300,21 +306,22 @@ class _PlayerState extends State<Player> {
         return;
       }
       c.addListener(onVc);
-      await c.play();
-      if (speed != 1.0 && !widget.live) await c.setPlaybackSpeed(speed);
-      if (muted) await c.setVolume(0);
-      if (repMode == 'one') await c.setLooping(true);
-      final ra = resumeAt;
-      if (ra != null && !widget.live) {
-        resumeAt = null;
-        await c.seekTo(ra);
-      }
+      // show the picture the moment it is ready; everything else is applied while it plays
       setState(() {
         vc = c;
         loading = false;
       });
+      unawaited(c.play());
+      applyGain(c);
       poke();
       applySubs();
+      if (speed != 1.0 && !widget.live) unawaited(c.setPlaybackSpeed(speed));
+      if (repMode == 'one') unawaited(c.setLooping(true));
+      final ra = resumeAt;
+      if (ra != null && !widget.live) {
+        resumeAt = null;
+        unawaited(c.seekTo(ra));
+      }
     } catch (e) {
       try {
         await c.dispose();
@@ -356,6 +363,7 @@ class _PlayerState extends State<Player> {
     setState(() {
       osdIcon = icon;
       osd = text;
+      osdLvl = false;
     });
     osdT?.cancel();
     osdT = Timer(const Duration(milliseconds: 900), () {
@@ -368,13 +376,9 @@ class _PlayerState extends State<Player> {
     if (v == null) {
       // the play button also works while the stream is still opening: after an error, or when
       // opening is taking long, it starts the stream again; otherwise it just says so
+      // (no "please wait" message any more: it just retries quietly when needed)
       final waited = DateTime.now().difference(loadStart).inSeconds;
-      if (err != null || waited >= 6) {
-        showPill('Starting...');
-        play(cur.url, cur.alt);
-      } else {
-        showPill('Starting, please wait...');
-      }
+      if (err != null || waited >= 6) play(cur.url, cur.alt);
       poke();
       return;
     }
@@ -382,11 +386,61 @@ class _PlayerState extends State<Player> {
     poke();
   }
 
+  // Volume above the phone's maximum is added as player gain (the same idea as FileX's 0-30 scale)
+  void applyGain(VideoPlayerController c) {
+    final g = muted ? 0.0 : gain;
+    try {
+      if (g > 1.0) {
+        VideoPlayerPlatform.instance.setVolume(c.textureId, g).catchError((_) {});
+      } else {
+        c.setVolume(g);
+      }
+    } catch (_) {
+      try {
+        c.setVolume(g > 1.0 ? 1.0 : g);
+      } catch (_) {}
+    }
+  }
+
   void mute() {
     muted = !muted;
-    vc?.setVolume(muted ? 0 : 1);
-    showOsd(muted ? Icons.volume_off : Icons.volume_up, muted ? 'Muted' : 'Sound on');
+    final c = vc;
+    if (c != null) applyGain(c);
+    showLevel(muted ? Icons.volume_off : Icons.volume_up, muted ? 0 : vol30, true);
     poke();
+  }
+
+  // small FileX style pill: icon + number (0-30), red for volume, dark for brightness
+  void showLevel(IconData icon, int n, bool isVol) {
+    setState(() {
+      osdIcon = icon;
+      osd = '$n';
+      osdLvl = true;
+      osdCol = isVol ? const Color(0xFFD81B4A) : const Color(0xFF1E1E24);
+    });
+    osdT?.cancel();
+    osdT = Timer(const Duration(milliseconds: 1100), () {
+      if (mounted) setState(() => osd = null);
+    });
+  }
+
+  void setVol(int l) {
+    vol30 = l.clamp(0, 30).toInt();
+    // 0-15: phone volume; 16-30: phone stays at maximum and the player adds gain
+    nat('setVolume', (vol30 / 15.0).clamp(0.0, 1.0));
+    gain = vol30 <= 15 ? 1.0 : 1.0 + (vol30 - 15) * 0.08;
+    muted = false;
+    final c = vc;
+    if (c != null) applyGain(c);
+    showLevel(vol30 == 0 ? Icons.volume_off : Icons.volume_up, vol30, true);
+  }
+
+  void setBri(int l) {
+    bri30 = l.clamp(0, 30).toInt();
+    // 30 is full brightness; the curve makes the low numbers brighter than a straight line
+    final b = bri30 == 0 ? 0.02 : math.pow(bri30 / 30.0, 0.6).toDouble();
+    nat('setBrightness', b);
+    showLevel(Icons.brightness_7, bri30, false);
   }
 
   Future<void> seek(int sec) async {
@@ -637,19 +691,16 @@ class _PlayerState extends State<Player> {
   // ---- touch gestures ----
   void vStart(DragStartDetails d, double w) {
     dragMode = d.localPosition.dx < w / 2 ? 2 : 1;
-    accum = dragMode == 1 ? volume : bright;
+    accum = (dragMode == 1 ? vol30 : bri30) / 30.0;
   }
 
   void vUpdate(DragUpdateDetails d, double h) {
-    accum = (accum - d.delta.dy / (h * 0.7)).clamp(0.0, 1.0).toDouble();
+    accum = (accum - d.delta.dy / (h * 0.55)).clamp(0.0, 1.0).toDouble();
+    final l = (accum * 30).round();
     if (dragMode == 1) {
-      volume = accum;
-      nat('setVolume', volume);
-      showOsd(volume == 0 ? Icons.volume_off : Icons.volume_up, 'Volume ${(volume * 100).round()}%');
+      if (l != vol30 || osd == null) setVol(l);
     } else {
-      bright = accum;
-      nat('setBrightness', bright < 0.02 ? 0.02 : bright);
-      showOsd(Icons.brightness_6, 'Brightness ${(bright * 100).round()}%');
+      if (l != bri30 || osd == null) setBri(l);
     }
   }
 
@@ -737,9 +788,8 @@ class _PlayerState extends State<Player> {
     if (v != null && v.value.isInitialized) {
       final b = v.value.buffered;
       final ahead = b.isEmpty ? Duration.zero : b.last.end - v.value.position;
-      final target = widget.live ? 6000 : 10000; // ms of video that counts as 100%
+      final target = widget.live ? 1500 : 3000; // ms of video that counts as 100% (starts fast)
       p = (ahead.inMilliseconds * 100 / target).clamp(0, 100).round();
-      if (kbps <= 0 && p > pctHold) p = pctHold; // no data coming in -> no progress
     }
     if (p > pctHold) pctHold = p;
     return pctHold;
@@ -1165,7 +1215,23 @@ class _PlayerState extends State<Player> {
                           style: const TextStyle(fontSize: 12, color: Colors.greenAccent)),
                     ),
                   ),
-                if (!pip && osd != null)
+                if (!pip && osd != null && osdLvl)
+                  Align(
+                    alignment: const Alignment(0, -0.42),
+                    child: Container(
+                      padding: EdgeInsets.symmetric(horizontal: 12 * k, vertical: 5 * k),
+                      decoration: BoxDecoration(
+                          color: osdCol, borderRadius: BorderRadius.circular(20 * k)),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(osdIcon, size: 15 * k, color: Colors.white),
+                        SizedBox(width: 6 * k),
+                        Text(osd!,
+                            style: TextStyle(
+                                fontSize: 13 * k, fontWeight: FontWeight.bold, color: Colors.white)),
+                      ]),
+                    ),
+                  ),
+                if (!pip && osd != null && !osdLvl)
                   Center(
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),

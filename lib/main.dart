@@ -761,6 +761,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     // Movies and series load in the background (counts, ALL and search)
+    s.live.start();
     s.movie.start();
     s.series.start();
     // New content is picked up automatically while the app is open
