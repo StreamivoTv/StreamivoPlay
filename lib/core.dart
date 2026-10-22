@@ -186,7 +186,7 @@ class Cfg {
   }
 
   // Parental PIN: the default is 0000 until the customer changes it (an empty value = PIN removed)
-  static String get pin => (_p?.containsKey('pin') ?? false) ? gs('pin') : '0000';
+  static String get pin => _p?.getString('pin') ?? '0000';
   // Adult folders stay open for this app session only (memory only: a fresh start asks the PIN again)
   static bool adultOk = false;
 
