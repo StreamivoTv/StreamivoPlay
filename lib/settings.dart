@@ -622,7 +622,7 @@ class _SettingsState extends State<SettingsPage> {
           width: 600,
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text(
-                'Search and download subtitles from OpenSubtitles inside the player. Enter your opensubtitles.com account below.',
+                'Optional. English / Hindi / Spanish subtitles that are not inside the movie are searched on OpenSubtitles automatically. Leave these empty to use the app default account.',
                 style: TextStyle(color: Colors.white70, height: 1.35)),
             const SizedBox(height: 8),
             FxCheck('Enable OpenSubtitles', on, (v) => set(() => on = v), boxFirst: true),

@@ -7,6 +7,7 @@ import 'package:video_player_platform_interface/video_player_platform_interface.
     show VideoPlayerPlatform;
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'core.dart';
+import 'subs.dart';
 
 // ---- decoder choice (applied through the fvp engine before a video is opened) ----
 // The engine setup itself (decoders, buffer, sound enhancer) lives in core.dart: applyFvp()
@@ -88,6 +89,8 @@ class _PlayerState extends State<Player> {
   List<Map<String, String>> audioTracks = [], subTracks = [];
   String audioSel = '', audioLabel = '';
   String subSel = 'auto', subLabel = '';
+  List<Cue>? onlineCues; // subtitle file found online (used when the video has no track in the wanted language)
+  bool onlineOn = false;
   String repMode = 'off'; // off | one | ab
   Duration? abA, abB, resumeAt;
   String? decOverride;
@@ -114,8 +117,6 @@ class _PlayerState extends State<Player> {
     inPip.addListener(onPip);
     WakelockPlus.enable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    // phone volume to maximum: the 0-30 number on screen is the real player volume
-    nat('setVolume', 1.0);
     nat('getBrightness').then((v) {
       if (v is double) bri30 = (math.pow(v.clamp(0.0, 1.0), 1 / 0.6) * 30).round().clamp(0, 30).toInt();
     });
@@ -274,14 +275,15 @@ class _PlayerState extends State<Player> {
     });
     await disposeLater(old);
     if (!mounted || my != gen) return;
-    final real = widget.live ? url : await resolveFinal(url);
+    // live: the last tries follow the server's redirects by hand (some channels are moved to another host)
+    final real = (!widget.live || attempt >= 2) ? await resolveFinal(url) : url;
     if (!mounted || my != gen) return;
     final dm = decOverride ?? decMode;
     _applyDecoder(dm == 'hwdef' ? 'auto' : dm);
     final c = VideoPlayerController.networkUrl(Uri.parse(real),
-        httpHeaders: attempt == 1 ? const <String, String>{} : ua);
+        httpHeaders: (widget.live ? attempt >= 2 : attempt == 1) ? const <String, String>{} : ua);
     try {
-      await c.initialize().timeout(const Duration(seconds: 25));
+      await c.initialize().timeout(Duration(seconds: widget.live ? 15 : 25));
       if (!mounted || my != gen) {
         await c.dispose();
         return;
@@ -309,7 +311,14 @@ class _PlayerState extends State<Player> {
       } catch (_) {}
       if (!mounted || my != gen) return;
       lastErr = '$e';
-      if (attempt == 0 && !widget.live) {
+      if (widget.live && attempt < 2) {
+        // live: other format first (ts / m3u8), then the same channel with redirects followed, no custom headers
+        if (attempt == 0 && alt != null) {
+          play(alt, null, attempt: 1);
+        } else {
+          play(cur.url, null, attempt: 2);
+        }
+      } else if (attempt == 0 && !widget.live) {
         // second try without custom headers
         play(url, alt, attempt: 1);
       } else if (alt != null) {
@@ -404,20 +413,19 @@ class _PlayerState extends State<Player> {
     });
   }
 
-  // Player gain for the 0-30 volume scale (VLC style: the sound can be boosted above 100%)
-  //   0 = mute | 10 = low (1.0x) | 15 = normal (1.4x) | 20 = loud (2.0x) | 25 = boost (2.8x) | 30 = max (3.6x)
+  // Player gain for the 0-25 volume scale (VLC style: the sound can be boosted above 100%)
+  //   0 = mute | 10 = low (0.67x) | 15 = normal (1.0x, the phone volume decides) | 20 = loud (1.6x) | 25 = boost (2.2x)
+  static const volMax = 25;
   static double gainFor(int v) {
     if (v <= 0) return 0.0;
-    if (v <= 15) return 0.1 + 1.3 * (v / 15.0);
-    if (v <= 20) return 1.4 + (v - 15) * 0.12;
-    return 2.0 + (v - 20) * 0.16;
+    if (v <= 15) return v / 15.0;
+    return 1.0 + (v - 15) * 0.12;
   }
 
   void setVol(int l) {
-    vol30 = l.clamp(0, 30).toInt();
-    // FileX style: the phone volume goes to maximum and the number 0-30 is the player volume
-    // (see gainFor: 10 = low, 15 = normal, 25 = strong boost)
-    nat('setVolume', vol30 == 0 ? 0.0 : 1.0);
+    vol30 = l.clamp(0, volMax).toInt();
+    // The phone's own volume is never touched. The number on screen (0-25) is the player volume on top of it:
+    // 15 = normal (as the phone is set), 25 = strong boost (see gainFor)
     gain = gainFor(vol30);
     muted = false;
     final c = vc;
@@ -461,6 +469,8 @@ class _PlayerState extends State<Player> {
     // every new movie / episode starts again with Auto (English); the customer can change it
     subSel = Cfg.gb(widget.live ? 'sub_live' : 'sub_vod', true) ? 'auto' : 'off';
     subLabel = '';
+    onlineCues = null;
+    onlineOn = false;
     if (repMode == 'ab') repMode = 'off';
     decOverride = null;
     decRetried = false;
@@ -647,53 +657,77 @@ class _PlayerState extends State<Player> {
 
   // Applies the subtitle choice to the video:
   //   off | auto (the language chosen in Settings, English by default) | lang:xx | one track number
+  // A language that the video file itself does not have is searched online (OpenSubtitles).
   Future<void> applySubs({int retry = 0}) async {
     final v = vc;
     if (v == null) return;
+    final g = gen;
     try {
       if (subSel == 'off') {
+        onlineOn = false;
         await (v as dynamic).setSubtitleTracks(<int>[]);
+        if (mounted) setState(() {});
         return;
       }
       final l = await tracks('subtitle');
-      if (l.isEmpty) {
-        // some streams announce their subtitle tracks a little later: look again
-        if (retry < 3 && (subSel == 'auto' || subSel.startsWith('lang:'))) {
-          Future<void>.delayed(Duration(seconds: 2 + retry * 3), () {
-            if (mounted && vc == v) applySubs(retry: retry + 1);
-          });
-        }
+      final isLang = subSel == 'auto' || subSel.startsWith('lang:');
+      if (l.isEmpty && retry < 1 && isLang) {
+        // some streams announce their subtitle tracks a little later: look again once
+        Future<void>.delayed(const Duration(seconds: 2), () {
+          if (mounted && vc == v) applySubs(retry: retry + 1);
+        });
         return;
       }
       Map<String, String>? pickIt;
-      if (subSel == 'auto' || subSel.startsWith('lang:')) {
-        final want = subSel == 'auto'
-            ? Cfg.gs('os_lang', 'en').toLowerCase()
-            : subSel.substring(5).toLowerCase();
+      var want = '';
+      if (isLang) {
+        want = subSel == 'auto' ? Cfg.gs('os_lang', 'en').toLowerCase() : subSel.substring(5).toLowerCase();
         pickIt = trackFor(l, want);
         // a stream with one single unnamed subtitle track: show it
         if (pickIt == null && subSel == 'auto' && l.length == 1 && (l.first['lang'] ?? '').isEmpty) {
           pickIt = l.first;
         }
         if (pickIt == null) {
-          // this language is not in the stream: nothing is shown
+          // not inside the video file: try the internet (movies / series only)
           await (v as dynamic).setSubtitleTracks(<int>[]);
+          onlineOn = false;
+          if (!widget.live && OnlineSubs.ready) {
+            final cues = await OnlineSubs.fetch(cur.title, want);
+            if (!mounted || g != gen || vc != v) return;
+            if (cues != null) {
+              setState(() {
+                onlineCues = cues;
+                onlineOn = true;
+              });
+            }
+          }
           return;
         }
       }
+      onlineOn = false;
       final id = pickIt != null ? pickIt['id']! : subSel;
       await (v as dynamic).setSubtitleTracks(<int>[int.parse(id)]);
+      if (mounted) setState(() {});
     } catch (_) {}
+  }
+
+  // The subtitle line to draw: from the online file, or from the video's own track
+  String capText(VideoPlayerController? v) {
+    if (v == null || subSel == 'off') return '';
+    final oc = onlineCues;
+    if (onlineOn && oc != null) return OnlineSubs.at(oc, v.value.position.inMilliseconds);
+    return v.value.caption.text;
   }
 
   Future<void> pickSub(String id, String label) async {
     subSel = id;
     subLabel = label;
+    if (mounted) setState(() => menu = 'main');
     await applySubs();
-    if (id.startsWith('lang:') && subTracks.isNotEmpty && trackFor(subTracks, id.substring(5)) == null) {
+    if (id.startsWith('lang:') && !onlineOn && trackFor(subTracks, id.substring(5)) == null &&
+        (widget.live || !OnlineSubs.ready)) {
       toast('$label subtitles are not available for this video.');
     }
-    if (mounted) setState(() => menu = 'main');
   }
 
   // ---- repeat ----
@@ -746,12 +780,12 @@ class _PlayerState extends State<Player> {
   // ---- touch gestures ----
   void vStart(DragStartDetails d, double w) {
     dragMode = d.localPosition.dx < w / 2 ? 2 : 1;
-    accum = (dragMode == 1 ? vol30 : bri30) / 30.0;
+    accum = dragMode == 1 ? vol30 / volMax : bri30 / 30.0;
   }
 
   void vUpdate(DragUpdateDetails d, double h) {
     accum = (accum - d.delta.dy / (h * 0.55)).clamp(0.0, 1.0).toDouble();
-    final l = (accum * 30).round();
+    final l = (accum * (dragMode == 1 ? volMax : 30)).round();
     if (dragMode == 1) {
       if (l != vol30 || osd == null) setVol(l);
     } else {
@@ -1094,7 +1128,7 @@ class _PlayerState extends State<Player> {
           opt('Auto (${langName(Cfg.gs('os_lang', 'en'))})', subSel == 'auto', () => pickSub('auto', 'Auto'),
               first: true),
           for (final c in subChoices)
-            opt(trackFor(subTracks, c[0]) == null ? '${c[1]}  (not available)' : c[1],
+            opt(c[1],
                 subSel == 'lang:${c[0]}', () => pickSub('lang:${c[0]}', c[1])),
           for (final t in other) opt(t['label']!, subSel == t['id'], () => pickSub(t['id']!, t['label']!)),
         ];
@@ -1206,7 +1240,7 @@ class _PlayerState extends State<Player> {
     final h = mq.height, w = mq.width;
     final k = (h / 360).clamp(0.9, 1.8).toDouble();
     final busy = loading || (v != null && v.value.isBuffering);
-    final cap = (v != null && subSel != 'off') ? v.value.caption.text : '';
+    final cap = capText(v);
     return PopScope(
       canPop: menu == null,
       onPopInvokedWithResult: (didPop, result) {

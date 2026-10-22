@@ -237,7 +237,8 @@ class _BrowseState extends State<Browse> {
     });
   }
 
-  Future<void> startPreview(It i, {bool second = false}) async {
+  // step 0: first format | 1: other format | 2: same channel, redirects followed by hand, no custom headers
+  Future<void> startPreview(It i, {int step = 0}) async {
     final my = ++pgen;
     _hold(true);
     final old = pv;
@@ -249,18 +250,14 @@ class _BrowseState extends State<Browse> {
     await disposeLater(old);
     if (!mounted || my != pgen) return;
     final pi = livePiOf(s, i.id, i.name);
-    final url = second ? pi.alt : pi.url;
-    if (url == null) {
-      setState(() {
-        pLoading = false;
-        _hold(false);
-        pErr = 'Unable to play this channel. Try another one.';
-      });
-      return;
-    }
-    final c = VideoPlayerController.networkUrl(Uri.parse(url), httpHeaders: ua);
+    var url = step == 1 ? pi.alt : pi.url;
+    if (step == 1 && url == null) step = 2;
+    if (step >= 2) url = await resolveFinal(pi.url);
+    if (!mounted || my != pgen) return;
+    final c = VideoPlayerController.networkUrl(Uri.parse(url!),
+        httpHeaders: step >= 2 ? const <String, String>{} : ua);
     try {
-      await c.initialize();
+      await c.initialize().timeout(const Duration(seconds: 15));
       if (!mounted || my != pgen) {
         await c.dispose();
         return;
@@ -273,15 +270,17 @@ class _BrowseState extends State<Browse> {
       unawaited(c.play());
       _releaseLater(my);
     } catch (_) {
-      await c.dispose();
+      try {
+        await c.dispose();
+      } catch (_) {}
       if (!mounted || my != pgen) return;
-      if (!second && pi.alt != null) {
-        startPreview(i, second: true);
+      if (step < 2) {
+        startPreview(i, step: step + 1);
       } else {
         setState(() {
           pLoading = false;
           _hold(false);
-        pErr = 'Unable to play this channel. Try another one.';
+          pErr = 'Unable to play this channel. Try another one.';
         });
       }
     }
