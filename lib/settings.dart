@@ -445,7 +445,7 @@ class _SettingsState extends State<SettingsPage> {
   Future<void> playerSettings() async {
     var live = Cfg.gs('dec_live', 'auto'), vod = Cfg.gs('dec_vod', 'hw'), fit = Cfg.fit;
     var dbg = Cfg.gb('dbg_overlay', false), ls = Cfg.gb('sub_live', true), vs = Cfg.gb('sub_vod', true);
-    var slang = Cfg.gs('os_lang', 'en'), enh = Cfg.gb('snd_enh', true);
+    var slang = Cfg.gs('os_lang', 'en'), enh = Cfg.gb('snd_enh', false);
     await showDialog(
       context: context,
       builder: (d) => StatefulBuilder(
@@ -466,7 +466,7 @@ class _SettingsState extends State<SettingsPage> {
             FxCheck('VOD subtitles', vs, (v) => set(() => vs = v)),
             fxLabel('Auto subtitle language'),
             sel(d2, set, 'Auto subtitle language', _subLangs, slang, (v) => slang = v),
-            FxCheck('Sound enhancer (louder, clearer dialogue)', enh, (v) => set(() => enh = v)),
+            FxCheck('Sound enhancer (experimental)', enh, (v) => set(() => enh = v)),
           ]),
           actions: [
             FxBtn('Cancel', () => Navigator.pop(d)),
@@ -479,7 +479,7 @@ class _SettingsState extends State<SettingsPage> {
               await Cfg.pb('sub_live', ls);
               await Cfg.pb('sub_vod', vs);
               await Cfg.ps('os_lang', slang);
-              final enhChanged = enh != Cfg.gb('snd_enh', true);
+              final enhChanged = enh != Cfg.gb('snd_enh', false);
               await Cfg.pb('snd_enh', enh);
               if (enhChanged) applyFvp('auto', force: true);
               if (d.mounted) Navigator.pop(d);

@@ -79,7 +79,7 @@ class _BootState extends State<Boot> with WidgetsBindingObserver {
         await Cfg.load().timeout(const Duration(seconds: 5));
       } catch (_) {}
       // the saved sound-enhancer choice is known only now
-      if (!Cfg.gb('snd_enh', true)) applyFvp('auto', force: true);
+      if (Cfg.gb('snd_enh', false)) applyFvp('auto', force: true);
       if (mounted) setState(() => ready = true);
     } catch (e, st) {
       if (mounted) setState(() => err = '$e\n$st');

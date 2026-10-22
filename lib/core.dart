@@ -269,7 +269,7 @@ List<String> fvpDecList(String m) => m == 'hw'
 void applyFvp(String m, {bool force = false}) {
   if (!force && m == fvpApplied) return;
   try {
-    final enh = Cfg.gb('snd_enh', true);
+    final enh = Cfg.gb('snd_enh', false);
     fvp.registerWith(options: {
       'platforms': ['android'],
       'video.decoders': fvpDecList(m),
@@ -278,14 +278,10 @@ void applyFvp(String m, {bool force = false}) {
         // look at less of the stream before starting playback (faster start)
         'avformat.probesize': '2000000',
         'avformat.analyzeduration': '2000000',
-        // Buffer: playback starts after ~3 s of video is stored and the player keeps up to 30 s ahead.
-        // The old small buffer was the reason live channels stopped and started again.
-        'buffer': '3000+30000',
-        // if the server drops the connection, connect again by itself instead of freezing
-        'avformat.reconnect': '1',
-        'avformat.reconnect_streamed': '1',
-        'avformat.reconnect_delay_max': '4',
-        // Sound enhancer: lifts quiet dialogue and keeps loud scenes under control
+        // Buffer: playback starts as fast as before (after ~1 s), but the player may now store up to
+        // 15 s ahead when the connection allows it (the old limit was 4 s).
+        'buffer': '1000+15000',
+        // Sound enhancer (optional, OFF by default; switch on in Player Settings)
         if (enh) 'audio.avfilter': 'dynaudnorm=f=250:g=9:p=0.6:m=10',
       },
     });
