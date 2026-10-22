@@ -249,13 +249,19 @@ class _BrowseState extends State<Browse> {
     });
     await disposeLater(old);
     if (!mounted || my != pgen) return;
+    // last try: wait a moment (the server may still hold the connection of the previous channel)
+    if (step == 3) {
+      await Future<void>.delayed(const Duration(seconds: 2));
+      if (!mounted || my != pgen) return;
+    }
     final pi = livePiOf(s, i.id, i.name);
     var url = step == 1 ? pi.alt : pi.url;
     if (step == 1 && url == null) step = 2;
-    if (step >= 2) url = await resolveFinal(pi.url);
+    if (step == 2) url = await resolveFinal(pi.url);
+    if (step == 3) url = pi.url;
     if (!mounted || my != pgen) return;
     final c = VideoPlayerController.networkUrl(Uri.parse(url!),
-        httpHeaders: step >= 2 ? const <String, String>{} : ua);
+        httpHeaders: step == 2 ? const <String, String>{} : ua);
     try {
       await c.initialize().timeout(const Duration(seconds: 15));
       if (!mounted || my != pgen) {
@@ -274,7 +280,7 @@ class _BrowseState extends State<Browse> {
         await c.dispose();
       } catch (_) {}
       if (!mounted || my != pgen) return;
-      if (step < 2) {
+      if (step < 3) {
         startPreview(i, step: step + 1);
       } else {
         setState(() {
@@ -342,7 +348,7 @@ class _BrowseState extends State<Browse> {
   }
 
   Future<void> openDetail(It i) async {
-    await Navigator.push(context, MaterialPageRoute(builder: (_) => DetailPage(s, i, t)));
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => DetailPage(s, i, t, siblings: live ? const <It>[] : List<It>.of(shown))));
     final fl = await loadList('fav_$t');
     favs = {for (final x in fl) x.id: x};
     recent = await loadList('recent_$t');

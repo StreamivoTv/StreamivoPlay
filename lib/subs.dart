@@ -47,7 +47,10 @@ class OnlineSubs {
         .post(Uri.parse('https://api.opensubtitles.com/api/v1/login'),
             headers: _h, body: jsonEncode({'username': _user, 'password': _pass}))
         .timeout(const Duration(seconds: 15));
-    if (r.statusCode != 200) return false;
+    if (r.statusCode != 200) {
+      status = 'login error ${r.statusCode}';
+      return false;
+    }
     final j = jsonDecode(r.body);
     _token = '${j['token'] ?? ''}';
     final b = '${j['base_url'] ?? ''}'.trim();
@@ -82,59 +85,134 @@ class OnlineSubs {
     return {'name': s, 'year': year, 'season': season, 'episode': episode};
   }
 
-  // Finds, downloads and reads one subtitle file. Returns null when nothing was found.
-  static Future<List<Cue>?> fetch(String title, String lang) async {
-    final c = clean(title);
-    if ((c['name'] ?? '').isEmpty || !ready) return null;
-    final ck = '${c['name']}|${c['season']}|${c['episode']}|$lang';
+  // What happened last (shown only in the player debug overlay, never to the customer)
+  static String status = '';
+
+  static Future<int?> _search(Map<String, String> q) async {
+    final sr = await http
+        .get(Uri.https(_base, '/api/v1/subtitles', q), headers: _h)
+        .timeout(const Duration(seconds: 20));
+    if (sr.statusCode != 200) {
+      status = 'search error ${sr.statusCode}';
+      return null;
+    }
+    final data = jsonDecode(sr.body)['data'];
+    if (data is! List || data.isEmpty) return null;
+    for (final d in data) {
+      final files = d['attributes']?['files'];
+      if (files is List && files.isNotEmpty && files.first['file_id'] != null) {
+        return (files.first['file_id'] as num).toInt();
+      }
+    }
+    return null;
+  }
+
+  // Finds, downloads and reads one subtitle file for this movie / episode. null = nothing found.
+  static Future<List<Cue>?> fetch(Pi pi, String lang) async {
+    if (!ready) {
+      status = 'no account set';
+      return null;
+    }
+    final m = pi.meta;
+    final tmdb = (m['tmdb'] ?? '').trim();
+    final isEp = (m['episode'] ?? '').isNotEmpty;
+    final c = clean(isEp ? (m['series'] ?? pi.title) : (m['name'] ?? pi.title));
+    final name = (c['name'] ?? '').toLowerCase();
+    final year = (m['year'] ?? '').isNotEmpty ? m['year']! : (c['year'] ?? '');
+    final ep = isEp ? (m['episode'] ?? '') : '';
+    final se = isEp ? (m['season'] ?? '') : '';
+    final ck = '${tmdb.isNotEmpty ? tmdb : name}|$se|$ep|$lang';
     final hit = _cache[ck];
     if (hit != null) return hit;
     try {
-      if (!await _login()) return null;
-      final isEp = (c['episode'] ?? '').isNotEmpty;
+      status = 'login...';
+      if (!await _login()) {
+        status = 'login failed';
+        return null;
+      }
       // parameters in alphabetical order, all lower case (the server asks for it)
-      final q = <String, String>{
-        if (isEp) 'episode_number': c['episode']!,
-        'languages': lang,
-        'order_by': 'download_count',
-        'query': c['name']!.toLowerCase(),
-        if (isEp) 'season_number': c['season']!,
-        'type': isEp ? 'episode' : 'movie',
-        if (!isEp && (c['year'] ?? '').isNotEmpty) 'year': c['year']!,
-      };
-      final sr = await http
-          .get(Uri.https(_base, '/api/v1/subtitles', q), headers: _h)
-          .timeout(const Duration(seconds: 20));
-      if (sr.statusCode != 200) return null;
-      final data = jsonDecode(sr.body)['data'];
-      if (data is! List || data.isEmpty) return null;
       int? fileId;
-      for (final d in data) {
-        final files = d['attributes']?['files'];
-        if (files is List && files.isNotEmpty && files.first['file_id'] != null) {
-          fileId = (files.first['file_id'] as num).toInt();
-          break;
+      if (tmdb.isNotEmpty && int.tryParse(tmdb) != null) {
+        status = 'search tmdb $tmdb';
+        fileId = await _search(isEp
+            ? {
+                'episode_number': ep,
+                'languages': lang,
+                'order_by': 'download_count',
+                'parent_tmdb_id': tmdb,
+                'season_number': se,
+                'type': 'episode',
+              }
+            : {
+                'languages': lang,
+                'order_by': 'download_count',
+                'tmdb_id': tmdb,
+                'type': 'movie',
+              });
+      }
+      if (fileId == null && name.isNotEmpty) {
+        status = 'search name "$name"';
+        fileId = await _search(isEp
+            ? {
+                'episode_number': ep,
+                'languages': lang,
+                'order_by': 'download_count',
+                'query': name,
+                'season_number': se,
+                'type': 'episode',
+              }
+            : {
+                'languages': lang,
+                'order_by': 'download_count',
+                'query': name,
+                'type': 'movie',
+                if (year.isNotEmpty) 'year': year,
+              });
+        // the year in the title can be wrong: once more without it
+        if (fileId == null && !isEp && year.isNotEmpty) {
+          fileId = await _search({
+            'languages': lang,
+            'order_by': 'download_count',
+            'query': name,
+            'type': 'movie',
+          });
         }
       }
-      if (fileId == null) return null;
+      if (fileId == null) {
+        if (!status.startsWith('search error')) status = 'not found';
+        return null;
+      }
+      status = 'download...';
       final dr = await http
           .post(Uri.https(_base, '/api/v1/download'),
               headers: {..._h, 'Authorization': 'Bearer $_token'},
               body: jsonEncode({'file_id': fileId, 'sub_format': 'srt'}))
           .timeout(const Duration(seconds: 20));
       if (dr.statusCode != 200) {
+        status = 'download error ${dr.statusCode}';
         if (dr.statusCode == 401) _token = null;
         return null;
       }
       final link = '${jsonDecode(dr.body)['link'] ?? ''}';
-      if (link.isEmpty) return null;
+      if (link.isEmpty) {
+        status = 'no link';
+        return null;
+      }
       final fr = await http.get(Uri.parse(link)).timeout(const Duration(seconds: 25));
-      if (fr.statusCode != 200) return null;
+      if (fr.statusCode != 200) {
+        status = 'file error ${fr.statusCode}';
+        return null;
+      }
       final cues = parseSrt(utf8.decode(fr.bodyBytes, allowMalformed: true));
-      if (cues.isEmpty) return null;
+      if (cues.isEmpty) {
+        status = 'empty file';
+        return null;
+      }
       _cache[ck] = cues;
+      status = 'ok ${cues.length} lines';
       return cues;
-    } catch (_) {
+    } catch (e) {
+      status = 'failed: ${'$e'.length > 60 ? '$e'.substring(0, 60) : e}';
       return null;
     }
   }

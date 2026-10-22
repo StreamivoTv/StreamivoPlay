@@ -21,7 +21,8 @@ class DetailPage extends StatefulWidget {
   final Session s;
   final It it;
   final String type; // movie | series
-  const DetailPage(this.s, this.it, this.type, {super.key});
+  final List<It> siblings; // the list the movie was opened from (for the previous / next buttons)
+  const DetailPage(this.s, this.it, this.type, {this.siblings = const [], super.key});
   @override
   State<DetailPage> createState() => _DetailState();
 }
@@ -185,6 +186,11 @@ class _DetailState extends State<DetailPage> {
     return r.isEmpty ? '' : '$r min';
   }
 
+  String get tmdbId => clean(info['tmdb_id'] ?? info['tmdb']);
+
+  // every episode of every season, in order (the player's previous / next buttons walk through it)
+  List<_Ep> allEps() => [for (final k in seasons.keys) ...eps(k)];
+
   List<_Ep> eps(String k) {
     final out = <_Ep>[];
     for (final e in (seasons[k] ?? <dynamic>[])) {
@@ -204,7 +210,12 @@ class _DetailState extends State<DetailPage> {
           dur,
           n,
           Pi(t, s.seriesUrl('${e['id']}', xe),
-              s.seriesUrl('${e['id']}', xe == 'mp4' ? 'mkv' : 'mp4'), '${e['id']}')));
+              s.seriesUrl('${e['id']}', xe == 'mp4' ? 'mkv' : 'mp4'), '${e['id']}', {
+            'series': it.name,
+            'tmdb': tmdbId,
+            'season': k,
+            'episode': n,
+          })));
     }
     return out;
   }
@@ -218,14 +229,33 @@ class _DetailState extends State<DetailPage> {
   void watchNow() {
     if (isSeries) {
       if (seasons.isEmpty) return;
-      final l = eps(seasons.keys.first);
+      final l = allEps();
       if (l.isNotEmpty) watch([for (final e in l) e.pi], 0);
     } else {
-      final ext = movieExt.isEmpty ? it.ext : movieExt;
-      final ex = ext.isEmpty ? 'mp4' : ext;
-      watch([
-        Pi(it.name, s.movieUrl(it.id, ex), s.movieUrl(it.id, ex == 'mp4' ? 'mkv' : 'mp4'), it.id)
-      ], 0);
+      Pi mk(It x, String ext, Map<String, String> m) {
+        final ex = ext.isEmpty ? 'mp4' : ext;
+        return Pi(x.name, s.movieUrl(x.id, ex), s.movieUrl(x.id, ex == 'mp4' ? 'mkv' : 'mp4'), x.id, m);
+      }
+
+      // the movie list it was opened from: back / forward in the player go to the previous / next movie
+      final sib = widget.siblings;
+      final at = sib.indexWhere((x) => x.id == it.id);
+      final list = <Pi>[];
+      var idx = 0;
+      if (at >= 0) {
+        for (var i = 0; i < sib.length; i++) {
+          final x = sib[i];
+          if (x.id == it.id) {
+            idx = list.length;
+            list.add(mk(x, movieExt.isEmpty ? it.ext : movieExt, {'tmdb': tmdbId, 'year': year, 'name': it.name}));
+          } else {
+            list.add(mk(x, x.ext, {'name': x.name}));
+          }
+        }
+      } else {
+        list.add(mk(it, movieExt.isEmpty ? it.ext : movieExt, {'tmdb': tmdbId, 'year': year, 'name': it.name}));
+      }
+      watch(list, idx);
     }
   }
 
@@ -369,7 +399,15 @@ class _DetailState extends State<DetailPage> {
     final e = l[i];
     final th = e.thumb.isNotEmpty ? e.thumb : posterUrl;
     return InkWell(
-      onTap: () => watch([for (final x in l) x.pi], i),
+      onTap: () {
+        final all = allEps();
+        final at = all.indexWhere((x) => x.pi.id == e.pi.id);
+        if (at >= 0) {
+          watch([for (final x in all) x.pi], at);
+        } else {
+          watch([for (final x in l) x.pi], i);
+        }
+      },
       focusColor: Colors.white12,
       borderRadius: BorderRadius.circular(14),
       child: Container(

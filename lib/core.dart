@@ -309,7 +309,9 @@ String _b64(String s) {
 class Pi {
   final String title, url;
   final String? alt, id;
-  const Pi(this.title, this.url, [this.alt, this.id]);
+  // extra facts used to find subtitles: tmdb, year, name, series, season, episode
+  final Map<String, String> meta;
+  const Pi(this.title, this.url, [this.alt, this.id, this.meta = const {}]);
 }
 
 // ---------------- Library item (channel / movie / series) ----------------

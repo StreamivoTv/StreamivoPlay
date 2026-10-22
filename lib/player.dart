@@ -264,6 +264,10 @@ class _PlayerState extends State<Player> {
   Future<void> play(String url, String? alt, {int attempt = 0}) async {
     final my = ++gen;
     final old = vc;
+    if (widget.live && attempt == 3) {
+      await Future<void>.delayed(const Duration(seconds: 2));
+      if (!mounted || my != gen) return;
+    }
     setState(() {
       vc = null;
       loading = true;
@@ -276,12 +280,12 @@ class _PlayerState extends State<Player> {
     await disposeLater(old);
     if (!mounted || my != gen) return;
     // live: the last tries follow the server's redirects by hand (some channels are moved to another host)
-    final real = (!widget.live || attempt >= 2) ? await resolveFinal(url) : url;
+    final real = (!widget.live || attempt == 2) ? await resolveFinal(url) : url;
     if (!mounted || my != gen) return;
     final dm = decOverride ?? decMode;
     _applyDecoder(dm == 'hwdef' ? 'auto' : dm);
     final c = VideoPlayerController.networkUrl(Uri.parse(real),
-        httpHeaders: (widget.live ? attempt >= 2 : attempt == 1) ? const <String, String>{} : ua);
+        httpHeaders: (widget.live ? attempt == 2 : attempt == 1) ? const <String, String>{} : ua);
     try {
       await c.initialize().timeout(Duration(seconds: widget.live ? 15 : 25));
       if (!mounted || my != gen) {
@@ -311,7 +315,10 @@ class _PlayerState extends State<Player> {
       } catch (_) {}
       if (!mounted || my != gen) return;
       lastErr = '$e';
-      if (widget.live && attempt < 2) {
+      if (widget.live && attempt == 2) {
+        // last try: wait a moment (the server may still hold the connection of the previous channel)
+        play(cur.url, null, attempt: 3);
+      } else if (widget.live && attempt < 2) {
         // live: other format first (ts / m3u8), then the same channel with redirects followed, no custom headers
         if (attempt == 0 && alt != null) {
           play(alt, null, attempt: 1);
@@ -683,16 +690,12 @@ class _PlayerState extends State<Player> {
       if (isLang) {
         want = subSel == 'auto' ? Cfg.gs('os_lang', 'en').toLowerCase() : subSel.substring(5).toLowerCase();
         pickIt = trackFor(l, want);
-        // a stream with one single unnamed subtitle track: show it
-        if (pickIt == null && subSel == 'auto' && l.length == 1 && (l.first['lang'] ?? '').isEmpty) {
-          pickIt = l.first;
-        }
         if (pickIt == null) {
           // not inside the video file: try the internet (movies / series only)
           await (v as dynamic).setSubtitleTracks(<int>[]);
           onlineOn = false;
           if (!widget.live && OnlineSubs.ready) {
-            final cues = await OnlineSubs.fetch(cur.title, want);
+            final cues = await OnlineSubs.fetch(cur, want);
             if (!mounted || g != gen || vc != v) return;
             if (cues != null) {
               setState(() {
@@ -1305,7 +1308,8 @@ class _PlayerState extends State<Player> {
                           '${v.value.size.width.toInt()}x${v.value.size.height.toInt()}   '
                           'pos ${fmt(v.value.position)}   '
                           'buf ${v.value.buffered.isEmpty ? '-' : fmt(v.value.buffered.last.end)}'
-                          '${v.value.isBuffering ? '   buffering' : ''}',
+                          '${v.value.isBuffering ? '   buffering' : ''}'
+                          '${OnlineSubs.status.isEmpty ? '' : '\nsubs: ${OnlineSubs.status}'}',
                           style: const TextStyle(fontSize: 12, color: Colors.greenAccent)),
                     ),
                   ),
