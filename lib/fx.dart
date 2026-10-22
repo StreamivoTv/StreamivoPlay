@@ -311,11 +311,16 @@ class _PinDlgState extends State<_PinDlg> {
       );
 }
 
-Future<bool> verifyPin(BuildContext c) async {
-  final pin = Cfg.gs('pin');
+// One correct PIN opens every adult folder (live, movies, series) until the app is closed.
+// force: always ask (used for changing / removing the PIN)
+Future<bool> verifyPin(BuildContext c, {bool force = false}) async {
+  final pin = Cfg.pin;
   if (pin.isEmpty) return true;
+  if (!force && Cfg.adultOk) return true;
   final e = await enterPin(c, 'Enter PIN');
-  return e != null && e == pin;
+  final ok = e != null && e == pin;
+  if (ok) Cfg.adultOk = true;
+  return ok;
 }
 
 // ---------------- Multi-screen layouts ----------------

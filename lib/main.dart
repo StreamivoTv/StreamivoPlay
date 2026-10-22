@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:fvp/fvp.dart' as fvp;
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'account.dart';
 import 'browse.dart';
@@ -19,14 +18,7 @@ Future<void> main() async {
   } catch (_) {}
   // FFmpeg-based engine under video_player: plays AC3 / EAC3 / MP2 / DTS audio that the
   // phone's own decoder cannot (the cause of channels with picture but no sound)
-  try {
-    fvp.registerWith(options: {
-      'platforms': ['android'],
-      'video.decoders': ['AMediaCodec', 'FFmpeg', 'dav1d'],
-      'audio.decoders': ['FFmpeg'],
-      'player': {'avformat.probesize': '2000000', 'avformat.analyzeduration': '2000000'},
-    });
-  } catch (_) {}
+  applyFvp('auto', force: true);
   ErrorWidget.builder = (d) => Material(
         color: bg,
         child: Center(
@@ -86,6 +78,8 @@ class _BootState extends State<Boot> with WidgetsBindingObserver {
       try {
         await Cfg.load().timeout(const Duration(seconds: 5));
       } catch (_) {}
+      // the saved sound-enhancer choice is known only now
+      if (!Cfg.gb('snd_enh', true)) applyFvp('auto', force: true);
       if (mounted) setState(() => ready = true);
     } catch (e, st) {
       if (mounted) setState(() => err = '$e\n$st');

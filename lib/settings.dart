@@ -18,8 +18,8 @@ void _snack(BuildContext c, String m) {
 
 // ---------------- Parental control (also opened from the home screen) ----------------
 Future<void> parentalDialog(BuildContext c) async {
-  if (Cfg.gs('pin').isNotEmpty) {
-    final ok = await verifyPin(c);
+  if (Cfg.pin.isNotEmpty) {
+    final ok = await verifyPin(c, force: true);
     if (!c.mounted) return;
     if (!ok) {
       _snack(c, 'Wrong PIN');
@@ -84,7 +84,7 @@ class _NewPinState extends State<_NewPin> {
         title: 'Set PIN',
         width: 440,
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Adult categories (XXX, 18+, Adult) will ask for this PIN.',
+          const Text('Adult categories (XXX, 18+, Adult) will ask for this PIN once each time the app is opened. Default PIN: 0000.',
               style: TextStyle(color: Colors.white70)),
           fxLabel('New PIN'),
           fxInput(a, '4 digits', obscure: true, type: TextInputType.number, maxLen: 4, autofocus: true),
@@ -294,6 +294,7 @@ class _SettingsState extends State<SettingsPage> {
     for (var h = -12; h <= 12; h++) ['$h', h == 0 ? 'No shift' : '${h > 0 ? '+' : ''}$h hours']
   ];
   static const _changelog = [
+    ['1.2.0', 'Smoother live TV (bigger buffer), subtitles in English / Hindi / Spanish, louder sound with boost and sound enhancer, adult folders locked with PIN (default 0000, asked once per app start).'],
     ['1.1.0', 'New home screen, account info page, series page with episode list, full settings, multi-screen layouts, parental PIN, speed test.'],
     ['1.0.0', 'First release.'],
   ];
@@ -444,6 +445,7 @@ class _SettingsState extends State<SettingsPage> {
   Future<void> playerSettings() async {
     var live = Cfg.gs('dec_live', 'auto'), vod = Cfg.gs('dec_vod', 'hw'), fit = Cfg.fit;
     var dbg = Cfg.gb('dbg_overlay', false), ls = Cfg.gb('sub_live', true), vs = Cfg.gb('sub_vod', true);
+    var slang = Cfg.gs('os_lang', 'en'), enh = Cfg.gb('snd_enh', true);
     await showDialog(
       context: context,
       builder: (d) => StatefulBuilder(
@@ -462,6 +464,9 @@ class _SettingsState extends State<SettingsPage> {
             FxCheck('Player debug overlay', dbg, (v) => set(() => dbg = v)),
             FxCheck('Live subtitles', ls, (v) => set(() => ls = v)),
             FxCheck('VOD subtitles', vs, (v) => set(() => vs = v)),
+            fxLabel('Auto subtitle language'),
+            sel(d2, set, 'Auto subtitle language', _subLangs, slang, (v) => slang = v),
+            FxCheck('Sound enhancer (louder, clearer dialogue)', enh, (v) => set(() => enh = v)),
           ]),
           actions: [
             FxBtn('Cancel', () => Navigator.pop(d)),
@@ -473,6 +478,10 @@ class _SettingsState extends State<SettingsPage> {
               await Cfg.pb('dbg_overlay', dbg);
               await Cfg.pb('sub_live', ls);
               await Cfg.pb('sub_vod', vs);
+              await Cfg.ps('os_lang', slang);
+              final enhChanged = enh != Cfg.gb('snd_enh', true);
+              await Cfg.pb('snd_enh', enh);
+              if (enhChanged) applyFvp('auto', force: true);
               if (d.mounted) Navigator.pop(d);
             }, primary: true),
           ],
@@ -747,7 +756,7 @@ class _SettingsState extends State<SettingsPage> {
       _Item(Icons.image_outlined, 'TMDB Posters', tmdbSub, tmdbDialog),
       _Item(Icons.closed_caption_outlined, 'OpenSubtitles', osSub, subsDialog),
       _Item(Icons.shield_outlined, 'Parental Control',
-          Cfg.gs('pin').isNotEmpty ? 'PIN set' : 'Not set', () async {
+          Cfg.pin.isNotEmpty ? 'PIN set' : 'Not set', () async {
         await parentalDialog(context);
         if (mounted) setState(() {});
       }),

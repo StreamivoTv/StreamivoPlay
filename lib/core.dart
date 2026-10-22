@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:fvp/fvp.dart' as fvp;
 import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
 
@@ -184,6 +185,11 @@ class Cfg {
     await _p?.setBool(k, v);
   }
 
+  // Parental PIN: the default is 0000 until the customer changes it (an empty value = PIN removed)
+  static String get pin => (_p?.containsKey('pin') ?? false) ? gs('pin') : '0000';
+  // Adult folders stay open for this app session only (memory only: a fresh start asks the PIN again)
+  static bool adultOk = false;
+
   static bool get h12 => gs('cfg_time', '24') == '12';
   static int get layout {
     final n = int.tryParse(gs('cfg_layout', '0')) ?? 0;
@@ -249,6 +255,42 @@ String fmt(Duration d) {
   final h = d.inHours;
   final m = two(d.inMinutes.remainder(60)), s = two(d.inSeconds.remainder(60));
   return h > 0 ? '$h:$m:$s' : '$m:$s';
+}
+
+// ---- player engine (fvp / mdk) setup, shared by main() and the player ----
+String fvpApplied = '';
+
+List<String> fvpDecList(String m) => m == 'hw'
+    ? ['AMediaCodec']
+    : (m == 'sw' ? ['FFmpeg', 'dav1d'] : ['AMediaCodec', 'FFmpeg', 'dav1d']);
+
+// Registers the engine with the decoder list for mode m (auto | hw | sw).
+// Also sets the buffer (smooth live TV) and the sound enhancer (louder, even sound like VLC).
+void applyFvp(String m, {bool force = false}) {
+  if (!force && m == fvpApplied) return;
+  try {
+    final enh = Cfg.gb('snd_enh', true);
+    fvp.registerWith(options: {
+      'platforms': ['android'],
+      'video.decoders': fvpDecList(m),
+      'audio.decoders': ['FFmpeg'],
+      'player': {
+        // look at less of the stream before starting playback (faster start)
+        'avformat.probesize': '2000000',
+        'avformat.analyzeduration': '2000000',
+        // Buffer: playback starts after ~3 s of video is stored and the player keeps up to 30 s ahead.
+        // The old small buffer was the reason live channels stopped and started again.
+        'buffer': '3000+30000',
+        // if the server drops the connection, connect again by itself instead of freezing
+        'avformat.reconnect': '1',
+        'avformat.reconnect_streamed': '1',
+        'avformat.reconnect_delay_max': '4',
+        // Sound enhancer: lifts quiet dialogue and keeps loud scenes under control
+        if (enh) 'audio.avfilter': 'dynaudnorm=f=250:g=9:p=0.6:m=10',
+      },
+    });
+    fvpApplied = m;
+  } catch (_) {}
 }
 
 Future<void> disposeLater(VideoPlayerController? c) async {

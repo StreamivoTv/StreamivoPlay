@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:fvp/fvp.dart' as fvp;
 import 'dart:math' as math;
 import 'package:video_player/video_player.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart'
@@ -10,26 +9,9 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'core.dart';
 
 // ---- decoder choice (applied through the fvp engine before a video is opened) ----
-String _appliedDec = 'auto';
+// The engine setup itself (decoders, buffer, sound enhancer) lives in core.dart: applyFvp()
+void _applyDecoder(String m) => applyFvp(m);
 int _activePlayers = 0;
-
-List<String> _decList(String m) => m == 'hw'
-    ? ['AMediaCodec']
-    : (m == 'sw' ? ['FFmpeg', 'dav1d'] : ['AMediaCodec', 'FFmpeg', 'dav1d']);
-
-void _applyDecoder(String m) {
-  if (m == _appliedDec) return;
-  try {
-    fvp.registerWith(options: {
-      'platforms': ['android'],
-      'video.decoders': _decList(m),
-      'audio.decoders': ['FFmpeg'],
-      // look at less of the stream before starting playback (faster start)
-      'player': {'avformat.probesize': '2000000', 'avformat.analyzeduration': '2000000'},
-    });
-    _appliedDec = m;
-  } catch (_) {}
-}
 
 // Opens the built-in player, or an external app when selected in Settings.
 // Returns true when the built-in player was used.
@@ -91,7 +73,7 @@ class _PlayerState extends State<Player> {
   String? osd, pill;
   IconData osdIcon = Icons.info;
   int vol30 = 15, bri30 = 20; // volume starts at normal (15); // FileX style 0-30 scales
-  double gain = 1.0, accum = 0, speed = 1.0;
+  double gain = gainFor(15), accum = 0, speed = 1.0;
   bool osdLvl = false;
   Color osdCol = const Color(0xFFD81B4A);
   int dragMode = 0; // 1 = volume (right side), 2 = brightness (left side)
@@ -132,6 +114,8 @@ class _PlayerState extends State<Player> {
     inPip.addListener(onPip);
     WakelockPlus.enable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    // phone volume to maximum: the 0-30 number on screen is the real player volume
+    nat('setVolume', 1.0);
     nat('getBrightness').then((v) {
       if (v is double) bri30 = (math.pow(v.clamp(0.0, 1.0), 1 / 0.6) * 30).round().clamp(0, 30).toInt();
     });
@@ -172,7 +156,7 @@ class _PlayerState extends State<Player> {
     WakelockPlus.enable(); // keep the screen on after the player closes too
     nat('resetBrightness');
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    if (_appliedDec != 'auto') {
+    if (fvpApplied != 'auto') {
       // give the old video time to close, then put the engine back to its normal setting
       Future<void>.delayed(const Duration(milliseconds: 1500), () {
         if (_activePlayers == 0) _applyDecoder('auto');
@@ -420,14 +404,21 @@ class _PlayerState extends State<Player> {
     });
   }
 
+  // Player gain for the 0-30 volume scale (VLC style: the sound can be boosted above 100%)
+  //   0 = mute | 10 = low (1.0x) | 15 = normal (1.4x) | 20 = loud (2.0x) | 25 = boost (2.8x) | 30 = max (3.6x)
+  static double gainFor(int v) {
+    if (v <= 0) return 0.0;
+    if (v <= 15) return 0.1 + 1.3 * (v / 15.0);
+    if (v <= 20) return 1.4 + (v - 15) * 0.12;
+    return 2.0 + (v - 20) * 0.16;
+  }
+
   void setVol(int l) {
     vol30 = l.clamp(0, 30).toInt();
-    // FileX style: the phone volume goes to maximum and the number 0-30 is the player volume:
-    // 5 = a little below normal, 15 = normal, 30 = about 3x louder
+    // FileX style: the phone volume goes to maximum and the number 0-30 is the player volume
+    // (see gainFor: 10 = low, 15 = normal, 25 = strong boost)
     nat('setVolume', vol30 == 0 ? 0.0 : 1.0);
-    gain = vol30 == 0
-        ? 0.0
-        : (vol30 <= 15 ? 0.6 + 0.4 * (vol30 / 15.0) : 1.0 + (vol30 - 15) * 0.13);
+    gain = gainFor(vol30);
     muted = false;
     final c = vc;
     if (c != null) applyGain(c);
@@ -467,6 +458,9 @@ class _PlayerState extends State<Player> {
     loadEpg();
     abA = null;
     abB = null;
+    // every new movie / episode starts again with Auto (English); the customer can change it
+    subSel = Cfg.gb(widget.live ? 'sub_live' : 'sub_vod', true) ? 'auto' : 'off';
+    subLabel = '';
     if (repMode == 'ab') repMode = 'off';
     decOverride = null;
     decRetried = false;
@@ -520,6 +514,50 @@ class _PlayerState extends State<Player> {
   };
 
   String langName(String code) => _langs[code.toLowerCase()] ?? code;
+
+  // The three languages the customer can pick directly in the subtitle menu
+  static const subChoices = [
+    ['en', 'English'],
+    ['hi', 'Hindi'],
+    ['es', 'Spanish'],
+  ];
+
+  // Short code (en / hi / es / ...) of a subtitle track from its language tag or its name
+  String langKey(Map<String, String> t) {
+    final lg = (t['lang'] ?? '').toLowerCase().replaceAll('_', '-');
+    final lb = (t['label'] ?? '').toLowerCase();
+    for (final c in subChoices) {
+      final two = c[0], name = c[1].toLowerCase();
+      final three = two == 'en' ? 'eng' : (two == 'hi' ? 'hin' : 'spa');
+      if (lg == two || lg == three || lg.startsWith('$two-') || lg.startsWith('$three-') || lg == name) {
+        return two;
+      }
+    }
+    for (final c in subChoices) {
+      final name = c[1].toLowerCase();
+      if (lb.contains(name) || RegExp('(^|[^a-z])${c[0]}([^a-z]|\$)').hasMatch(lb)) return c[0];
+    }
+    // other languages (urd -> ur, ara -> ar ...) so the Auto language can be any of them
+    final nm = _langs[lg.split('-').first];
+    if (nm != null) {
+      for (final e in _langs.entries) {
+        if (e.key.length == 2 && e.value == nm) return e.key;
+      }
+    }
+    return lg;
+  }
+
+  // Best track for a language: normal subtitles are preferred over "forced" / "SDH" ones
+  Map<String, String>? trackFor(List<Map<String, String>> l, String code) {
+    Map<String, String>? first;
+    for (final t in l) {
+      if (langKey(t) != code) continue;
+      final lb = (t['label'] ?? '').toLowerCase();
+      if (!lb.contains('forced') && !lb.contains('sdh') && !lb.contains('commentary')) return t;
+      first ??= t;
+    }
+    return first;
+  }
 
   String trackName(String title, String lang, int i) {
     final ln = lang.isEmpty ? '' : langName(lang);
@@ -607,29 +645,44 @@ class _PlayerState extends State<Player> {
     if (mounted) setState(() => menu = 'main');
   }
 
-  // Applies the subtitle choice to the video (Off / Auto = preferred language / one track)
-  Future<void> applySubs() async {
+  // Applies the subtitle choice to the video:
+  //   off | auto (the language chosen in Settings, English by default) | lang:xx | one track number
+  Future<void> applySubs({int retry = 0}) async {
     final v = vc;
     if (v == null) return;
     try {
       if (subSel == 'off') {
         await (v as dynamic).setSubtitleTracks(<int>[]);
-      } else if (subSel == 'auto') {
-        final l = await tracks('subtitle');
-        if (l.isEmpty) return;
-        final want = Cfg.gs('os_lang', 'en').toLowerCase();
-        var pickIt = l.first;
-        for (final t in l) {
-          final lg = (t['lang'] ?? '').toLowerCase();
-          if (lg.isNotEmpty && (lg == want || lg.startsWith(want) || want.startsWith(lg))) {
-            pickIt = t;
-            break;
-          }
-        }
-        await (v as dynamic).setSubtitleTracks(<int>[int.parse(pickIt['id']!)]);
-      } else {
-        await (v as dynamic).setSubtitleTracks(<int>[int.parse(subSel)]);
+        return;
       }
+      final l = await tracks('subtitle');
+      if (l.isEmpty) {
+        // some streams announce their subtitle tracks a little later: look again
+        if (retry < 3 && (subSel == 'auto' || subSel.startsWith('lang:'))) {
+          Future<void>.delayed(Duration(seconds: 2 + retry * 3), () {
+            if (mounted && vc == v) applySubs(retry: retry + 1);
+          });
+        }
+        return;
+      }
+      Map<String, String>? pickIt;
+      if (subSel == 'auto' || subSel.startsWith('lang:')) {
+        final want = subSel == 'auto'
+            ? Cfg.gs('os_lang', 'en').toLowerCase()
+            : subSel.substring(5).toLowerCase();
+        pickIt = trackFor(l, want);
+        // a stream with one single unnamed subtitle track: show it
+        if (pickIt == null && subSel == 'auto' && l.length == 1 && (l.first['lang'] ?? '').isEmpty) {
+          pickIt = l.first;
+        }
+        if (pickIt == null) {
+          // this language is not in the stream: nothing is shown
+          await (v as dynamic).setSubtitleTracks(<int>[]);
+          return;
+        }
+      }
+      final id = pickIt != null ? pickIt['id']! : subSel;
+      await (v as dynamic).setSubtitleTracks(<int>[int.parse(id)]);
     } catch (_) {}
   }
 
@@ -637,6 +690,9 @@ class _PlayerState extends State<Player> {
     subSel = id;
     subLabel = label;
     await applySubs();
+    if (id.startsWith('lang:') && subTracks.isNotEmpty && trackFor(subTracks, id.substring(5)) == null) {
+      toast('$label subtitles are not available for this video.');
+    }
     if (mounted) setState(() => menu = 'main');
   }
 
@@ -1031,11 +1087,16 @@ class _PlayerState extends State<Player> {
         ];
         break;
       case 'sub':
+        final other = [for (final t in subTracks) if (!subChoices.any((c) => c[0] == langKey(t))) t];
         rows = [
           hdr('Subtitles'),
           opt('Off', subSel == 'off', () => pickSub('off', 'Off')),
-          opt('Auto', subSel == 'auto', () => pickSub('auto', 'Auto'), first: true),
-          for (final t in subTracks) opt(t['label']!, subSel == t['id'], () => pickSub(t['id']!, t['label']!)),
+          opt('Auto (${langName(Cfg.gs('os_lang', 'en'))})', subSel == 'auto', () => pickSub('auto', 'Auto'),
+              first: true),
+          for (final c in subChoices)
+            opt(trackFor(subTracks, c[0]) == null ? '${c[1]}  (not available)' : c[1],
+                subSel == 'lang:${c[0]}', () => pickSub('lang:${c[0]}', c[1])),
+          for (final t in other) opt(t['label']!, subSel == t['id'], () => pickSub(t['id']!, t['label']!)),
         ];
         break;
       case 'repeat':
@@ -1072,7 +1133,7 @@ class _PlayerState extends State<Player> {
                       style: TextStyle(
                           fontSize: 10 * k, fontWeight: FontWeight.bold, color: Colors.white))),
               'Subtitles',
-              subSel == 'off' ? 'Off' : (subSel == 'auto' ? 'Auto' : subLabel),
+              subSel == 'off' ? 'Off' : (subSel == 'auto' ? 'Auto' : (subLabel.isEmpty ? 'On' : subLabel)),
               openSubs),
           row(Icon(Icons.repeat, size: 24 * k), 'Repeat',
               repMode == 'off' ? 'Off' : (repMode == 'one' ? 'One' : 'A-B'),

@@ -107,11 +107,9 @@ class _BrowseState extends State<Browse> {
     await select(catId);
   }
 
-  final Set<String> unlocked = {};
-
   // Parental control: hides adult categories from mixed lists
   List<It> _safe(List<It> l) {
-    if (Cfg.gs('pin').isEmpty) return l;
+    if (Cfg.pin.isEmpty) return l;
     final bad = <int>{
       for (final c in lib.cats)
         if (adultName('${c['category_name']}')) int.tryParse('${c['category_id']}') ?? -1
@@ -121,17 +119,17 @@ class _BrowseState extends State<Browse> {
   }
 
   Future<void> select(String id) async {
-    if (Cfg.gs('pin').isNotEmpty &&
-        adultName(lib.catName(int.tryParse(id) ?? -1)) &&
-        !unlocked.contains(id)) {
+    if (Cfg.pin.isNotEmpty &&
+        !Cfg.adultOk &&
+        adultName(lib.catName(int.tryParse(id) ?? -1))) {
       final ok = await verifyPin(context);
       if (!mounted) return;
       if (!ok) {
         ScaffoldMessenger.of(context)
             .showSnackBar(const SnackBar(content: Text('Wrong PIN')));
+        if (loading) setState(() => loading = false);
         return;
       }
-      unlocked.add(id);
     }
     final my = ++selGen;
     setState(() {
